@@ -1,0 +1,2077 @@
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio_rustls::TlsConnector;
+
+use crate::catalog::{local_publishable, readable_paths};
+use crate::media::{self, AudioBus, AudioPiece, Pull};
+use crate::db::{merge_history_into_db, Db, HoldingInput};
+use crate::error::AppResult;
+use crate::frames::{self, Frame};
+use crate::identity::{self, IdentityMaterial, SignalStore};
+use crate::ids::{self, smaller_device};
+use crate::relay;
+use crate::sync_logic::{self, HistoryEntry, PlaySource, QueueItem, SourceChoice, SourceKind};
+use crate::tls;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Nearby {
+    pub device_id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkStatus {
+    pub device_id: String,
+    pub name: String,
+    pub state: String,
+    pub path: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingOffer {
+    pub device_id: String,
+    pub name: String,
+    pub safety_number: String,
+    pub cert_der: Vec<u8>,
+    pub identity_public: Vec<u8>,
+    pub cert_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadStatus {
+    pub content_id: String,
+    pub state: String,
+    pub detail: String,
+}
+
+#[derive(Clone)]
+pub struct Live {
+    pub inner: Arc<Mutex<LiveInner>>,
+}
+
+#[derive(Default)]
+pub struct LiveInner {
+    pub nearby: Vec<Nearby>,
+    pub links: Vec<LinkStatus>,
+    pub listen_port: u16,
+    pub relay: String,
+    pub download: Option<DownloadStatus>,
+    pub offer: Option<PairingOffer>,
+    pub manual: Option<String>,
+    pub failures: HashMap<String, String>,
+    pub addresses: HashMap<String, String>,
+    pub playing: bool,
+    pub current_local: Option<String>,
+    pub buffer_enough: bool,
+    pub serving: bool,
+    pub serving_count: u32,
+    pub cancelled: HashSet<u64>,
+}
+
+pub enum Cmd {
+    Apply,
+    Publish,
+    AutoSync(String),
+    Pair(String),
+    Manual { host: String, port: u16 },
+    Confirm(String),
+    Reject(String),
+    Remove(String),
+    Paste(String),
+    Sync { feature: String, refresh: bool },
+    Resolve { feature: String, take: bool },
+    Download(String),
+    Activity { playing: bool, local_file_id: Option<String>, buffer_enough: bool },
+    Position { content_id: String, seconds: f64 },
+    CloseRoutes,
+}
+
+pub struct Network {
+    pub tx: mpsc::UnboundedSender<Cmd>,
+    pub live: Live,
+    pub bus: Arc<AudioBus>,
+}
+
+pub fn spawn(
+    app: AppHandle,
+    db: Arc<Mutex<Db>>,
+    material: IdentityMaterial,
+) -> AppResult<Network> {
+    let live = Live {
+        inner: Arc::new(Mutex::new(LiveInner::default())),
+    };
+    let bus = AudioBus::new();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (pull_tx, pull_rx) = mpsc::unbounded_channel();
+    let live_thread = live.clone();
+    let bus_thread = bus.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("network runtime");
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async move {
+            tokio::task::spawn_local(media::serve(bus_thread.clone(), pull_tx));
+            run(app, db, material, rx, pull_rx, live_thread, bus_thread).await;
+        }));
+    });
+    Ok(Network { tx, live, bus })
+}
+
+struct PeerOut {
+    device_id: String,
+    conn: u64,
+    dialed_by: String,
+    confirmed: bool,
+    path: String,
+    tx: mpsc::UnboundedSender<Frame>,
+    /// Bounded so file reads wait for the socket instead of queueing a whole file.
+    audio: mpsc::Sender<Frame>,
+}
+
+async fn run(
+    app: AppHandle,
+    db: Arc<Mutex<Db>>,
+    material: IdentityMaterial,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+    mut pull_rx: mpsc::UnboundedReceiver<Pull>,
+    live: Live,
+    bus: Arc<AudioBus>,
+) {
+    let mut store = SignalStore::open(db.clone(), material.identity, material.registration_id)
+        .expect("signal store");
+    let _ = store.ensure_prekeys().await;
+    let mut peers: HashMap<String, PeerOut> = HashMap::new();
+    let mut pending: HashSet<String> = HashSet::new();
+    let mut listener: Option<tokio::task::JoinHandle<()>> = None;
+    let mut relay_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut mdns: Option<mdns_sd::ServiceDaemon> = None;
+    let mut actual_port = 0u16;
+    let mut ready_sessions: HashSet<String> = HashSet::new();
+    let mut published_holdings = String::new();
+    let provider = tls::provider();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<NetEvent>();
+    trust_saved_peers(&db, &mut store);
+    publish(&app, &db, &live, &peers);
+    let mut reconnect = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            cmd = rx.recv() => {
+                let Some(cmd) = cmd else { break };
+                match cmd {
+                    Cmd::Apply => {
+                        let open = db.lock().map(|guard| network_open(&guard)).unwrap_or(false);
+                        if !open {
+                            publish_holdings(&db, &material, &mut store, &peers, &mut published_holdings).await;
+                            peers.clear();
+                            ready_sessions.clear();
+                            bus.close_routes();
+                        }
+                        restart_listener(&db, &material, &provider, &event_tx, &mut listener, &mut actual_port, &live).await;
+                        restart_discovery(&db, &material, actual_port, &event_tx, &mut mdns, &live).await;
+                        restart_relay(&db, &material, &provider, &event_tx, &mut relay_task, &live).await;
+                        if open {
+                            publish_holdings(&db, &material, &mut store, &peers, &mut published_holdings).await;
+                            dial_known(&db, &material, &provider, &event_tx, &live, &peers).await;
+                        }
+                        publish(&app, &db, &live, &peers);
+                    }
+                    Cmd::Publish => {
+                        publish_holdings(&db, &material, &mut store, &peers, &mut published_holdings).await;
+                    }
+                    Cmd::AutoSync(feature) => {
+                        auto_sync(&db, &material, &mut store, &peers, &feature).await;
+                    }
+                    Cmd::Pair(device_id) => {
+                        pending.insert(device_id.clone());
+                        if let Some(target) = nearby_of(&live, &device_id) {
+                            dial_peer(&db, &material, &provider, &event_tx, target.host, target.port, Some(device_id), &material.device_id).await;
+                        }
+                    }
+                    Cmd::Manual { host, port } => {
+                        let valid = host.parse::<Ipv4Addr>().is_ok() && port != 0;
+                        let allowed = db.lock().map(|guard| {
+                            let (incognito, _, sync, audio) = switches(&guard);
+                            !incognito && (sync || audio)
+                        }).unwrap_or(false);
+                        if !valid || !allowed {
+                            set_manual(&live, "failed");
+                            publish(&app, &db, &live, &peers);
+                            continue;
+                        }
+                        set_manual(&live, "dialing");
+                        remember_address(&db, &host, port);
+                        pending.insert(format!("manual:{host}:{port}"));
+                        publish(&app, &db, &live, &peers);
+                        dial_peer(&db, &material, &provider, &event_tx, host, port, None, &material.device_id).await;
+                    }
+                    Cmd::Confirm(device_id) => {
+                        confirm_peer(&db, &material, &live, &mut peers, &device_id, &app);
+                        trust_saved_peers(&db, &mut store);
+                        send_bundle(&db, &mut store, &peers, &device_id).await;
+                        publish(&app, &db, &live, &peers);
+                    }
+                    Cmd::Reject(device_id) => {
+                        pending.remove(&device_id);
+                        if let Some(peer) = peers.get(&device_id) {
+                            if !peer.confirmed {
+                                peers.remove(&device_id);
+                            }
+                        }
+                        if let Ok(mut guard) = live.inner.lock() {
+                            guard.offer = None;
+                        }
+                        publish(&app, &db, &live, &peers);
+                    }
+                    Cmd::Remove(device_id) => {
+                        peers.remove(&device_id);
+                        pending.remove(&device_id);
+                        ready_sessions.remove(&device_id);
+                        if let Ok(guard) = db.lock() {
+                            let _ = guard.remove_peer(&device_id);
+                        }
+                        store.forget_peer(&device_id);
+                        store.forget_sender_key(&material.device_id, material.distribution_id);
+                        let remaining: Vec<String> = peers.keys().filter(|id| ready_sessions.contains(*id)).cloned().collect();
+                        for peer_id in remaining {
+                            send_sender_key(&material, &mut store, &peers, &peer_id).await;
+                        }
+                        publish(&app, &db, &live, &peers);
+                    }
+                    Cmd::Paste(text) => {
+                        match identity::parse_pairing_text(&text) {
+                            Ok(parsed) => {
+                                stage_offer(&db, &material, &live, &parsed.identity_public, &parsed.cert_der, &parsed.display_name, &app);
+                            }
+                            Err(_) => {
+                                set_manual(&live, "badText");
+                                publish(&app, &db, &live, &peers);
+                            }
+                        }
+                    }
+                    Cmd::Sync { feature, refresh } => {
+                        send_sync(&db, &material, &mut store, &peers, &feature, refresh).await;
+                    }
+                    Cmd::Resolve { feature, take } => {
+                        resolve_pending(&app, &db, &feature, take);
+                    }
+                    Cmd::Download(content_id) => {
+                        start_download(&app, &db, &peers, &live, &bus, content_id).await;
+                    }
+                    Cmd::Activity { playing, local_file_id, buffer_enough } => {
+                        if let Ok(mut guard) = live.inner.lock() {
+                            guard.playing = playing;
+                            guard.current_local = local_file_id;
+                            guard.buffer_enough = buffer_enough;
+                        }
+                    }
+                    Cmd::Position { content_id, seconds } => {
+                        send_position(&db, &material, &mut store, &peers, &content_id, seconds).await;
+                    }
+                    Cmd::CloseRoutes => bus.close_routes(),
+                }
+            }
+            event = event_rx.recv() => {
+                let Some(event) = event else { break };
+                match event {
+                    NetEvent::Nearby(list) => {
+                        if let Ok(mut guard) = live.inner.lock() {
+                            guard.nearby = list;
+                        }
+                        dial_known(&db, &material, &provider, &event_tx, &live, &peers).await;
+                        publish(&app, &db, &live, &peers);
+                    }
+                    NetEvent::Connected { device_id, conn, target, dialed_by, path, writer, audio, identity_public, cert_der, name } => {
+                        if let Ok(mut guard) = live.inner.lock() {
+                            guard.failures.remove(&device_id);
+                            if guard.manual.as_deref() == Some("dialing") {
+                                guard.manual = Some("connected".into());
+                            }
+                        }
+                        if let Some(target) = &target {
+                            if let Ok(mut guard) = live.inner.lock() {
+                                guard.addresses.insert(target.clone(), device_id.clone());
+                            }
+                        }
+                        let before = peers.get(&device_id).map(|peer| peer.conn);
+                        adopt_connection(&db, &material, &live, &mut peers, &pending, &app, device_id.clone(), conn, dialed_by, path, writer, audio, identity_public, cert_der, name);
+                        if before != Some(conn) && peers.get(&device_id).is_some_and(|peer| peer.confirmed && peer.conn == conn) {
+                            ready_sessions.remove(&device_id);
+                            send_bundle(&db, &mut store, &peers, &device_id).await;
+                        }
+                        publish(&app, &db, &live, &peers);
+                    }
+                    NetEvent::DialFailed { device_id, target } => {
+                        if let Ok(mut guard) = live.inner.lock() {
+                            if let Some(device_id) = device_id {
+                                guard.failures.insert(device_id, "failed".into());
+                            }
+                            if guard.manual.as_deref() == Some("dialing") && target.is_some() {
+                                guard.manual = Some("failed".into());
+                            }
+                        }
+                        publish(&app, &db, &live, &peers);
+                    }
+                    NetEvent::Frame { device_id, frame } => {
+                        handle_frame(&app, &db, &material, &mut store, &peers, &live, &bus, &mut ready_sessions, &mut published_holdings, &device_id, frame).await;
+                    }
+                    NetEvent::Closed { device_id, conn } => {
+                        if peers.get(&device_id).is_none_or(|peer| peer.conn != conn) {
+                            continue;
+                        }
+                        peers.remove(&device_id);
+                        ready_sessions.remove(&device_id);
+                        publish(&app, &db, &live, &peers);
+                        maybe_relay_fallback(&db, &material, &provider, &event_tx, &device_id).await;
+                    }
+                    NetEvent::Invitation(invitation) => {
+                        join_invited(&db, &material, &provider, &event_tx, invitation).await;
+                    }
+                    NetEvent::RelayState(text) => {
+                        set_relay(&live, &text);
+                        publish(&app, &db, &live, &peers);
+                    }
+                }
+            }
+            _ = reconnect.tick() => {
+                let open = db.lock().map(|guard| network_open(&guard)).unwrap_or(false);
+                if open {
+                    dial_known(&db, &material, &provider, &event_tx, &live, &peers).await;
+                    let offline: Vec<String> = db.lock().ok()
+                        .and_then(|guard| guard.peers().ok())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|peer| peer.device_id)
+                        .filter(|id| !peers.contains_key(id))
+                        .collect();
+                    for device_id in offline {
+                        maybe_relay_fallback(&db, &material, &provider, &event_tx, &device_id).await;
+                    }
+                }
+            }
+            pull = pull_rx.recv() => {
+                match pull {
+                    Some(Pull::Open { id, device_id, content_id, start, end, reply }) => {
+                        bus.register(id, reply);
+                        if let Some(peer) = peers.get(&device_id).filter(|peer| peer.confirmed) {
+                            let _ = peer.tx.send(Frame::AudioReq { id, content_id, start, end });
+                        } else {
+                            bus.deliver(id, AudioPiece::failed("offline"));
+                        }
+                    }
+                    Some(Pull::Cancel { id, device_id }) => {
+                        bus.finish(id);
+                        if let Some(peer) = peers.get(&device_id) {
+                            let _ = peer.tx.send(Frame::AudioCancel { id });
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+}
+
+enum NetEvent {
+    Nearby(Vec<Nearby>),
+    Connected {
+        device_id: String,
+        conn: u64,
+        target: Option<String>,
+        dialed_by: String,
+        path: String,
+        writer: mpsc::UnboundedSender<Frame>,
+        audio: mpsc::Sender<Frame>,
+        identity_public: Vec<u8>,
+        cert_der: Vec<u8>,
+        name: String,
+    },
+    Frame { device_id: String, frame: Frame },
+    Closed { device_id: String, conn: u64 },
+    DialFailed { device_id: Option<String>, target: Option<String> },
+    Invitation(relay::Invitation),
+    RelayState(String),
+}
+
+fn network_open(db: &Db) -> bool {
+    let (incognito, discovery, sync, audio) = switches(db);
+    !incognito && (discovery || sync || audio)
+}
+
+fn set_manual(live: &Live, state: &str) {
+    if let Ok(mut guard) = live.inner.lock() {
+        guard.manual = Some(state.to_string());
+    }
+}
+
+fn remember_address(db: &Arc<Mutex<Db>>, host: &str, port: u16) {
+    let Ok(guard) = db.lock() else { return };
+    let mut list = guard.setting_json("manualAddresses").unwrap_or(json!([]));
+    let entry = format!("{host}:{port}");
+    if let Some(items) = list.as_array_mut() {
+        items.retain(|item| item.as_str() != Some(entry.as_str()));
+        items.insert(0, json!(entry));
+        items.truncate(8);
+    } else {
+        list = json!([entry]);
+    }
+    let _ = guard.set_device_setting("manualAddresses", list);
+}
+
+/// Paired devices that are not connected get dialed at their discovered address, then at saved manual addresses.
+async fn dial_known(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    provider: &Arc<rustls::crypto::CryptoProvider>,
+    events: &mpsc::UnboundedSender<NetEvent>,
+    live: &Live,
+    peers: &HashMap<String, PeerOut>,
+) {
+    let (saved, manual, allowed) = {
+        let Ok(guard) = db.lock() else { return };
+        let (incognito, _, sync, audio) = switches(&guard);
+        let saved: Vec<String> = guard.peers().unwrap_or_default().into_iter().map(|peer| peer.device_id).collect();
+        let manual: Vec<String> = guard
+            .setting_json("manualAddresses")
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect();
+        (saved, manual, !incognito && (sync || audio))
+    };
+    if !allowed {
+        return;
+    }
+    let missing: Vec<String> = saved.into_iter().filter(|id| !peers.contains_key(id)).collect();
+    if missing.is_empty() {
+        return;
+    }
+    let (nearby, addresses) = live
+        .inner
+        .lock()
+        .map(|guard| (guard.nearby.clone(), guard.addresses.clone()))
+        .unwrap_or_default();
+    for device_id in &missing {
+        if let Some(target) = nearby.iter().find(|item| &item.device_id == device_id) {
+            dial_peer(db, material, provider, events, target.host.clone(), target.port, Some(device_id.clone()), &material.device_id).await;
+        }
+    }
+    for address in manual {
+        let Some((host, port)) = address.rsplit_once(':') else { continue };
+        let Ok(port) = port.parse::<u16>() else { continue };
+        if nearby.iter().any(|item| item.host == host && item.port == port) {
+            continue;
+        }
+        if addresses.get(&address).is_some_and(|id| peers.contains_key(id) || !missing.contains(id)) {
+            continue;
+        }
+        dial_peer(db, material, provider, events, host.to_string(), port, None, &material.device_id).await;
+    }
+}
+
+fn switches(db: &Db) -> (bool, bool, bool, bool) {
+    let incognito = db.setting_bool("incognito").unwrap_or(false);
+    let discovery = db.setting_bool("discovery").unwrap_or(false);
+    let sync = db.setting_bool("syncEnabled").unwrap_or(false);
+    let audio = db.setting_bool("audioShare").unwrap_or(false);
+    (incognito, discovery, sync, audio)
+}
+
+fn relay_ready(db: &Db) -> bool {
+    let (incognito, _, sync, audio) = switches(db);
+    if incognito || (!sync && !audio) {
+        return false;
+    }
+    let host = db.setting_string("relayHost").unwrap_or_default();
+    let id = db.setting_string("relayDeviceId").unwrap_or_default();
+    let token = db.setting_string("relayToken").unwrap_or_default();
+    !host.is_empty() && !id.is_empty() && !token.is_empty()
+}
+
+async fn restart_listener(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    provider: &Arc<rustls::crypto::CryptoProvider>,
+    events: &mpsc::UnboundedSender<NetEvent>,
+    listener: &mut Option<tokio::task::JoinHandle<()>>,
+    actual_port: &mut u16,
+    live: &Live,
+) {
+    if let Some(task) = listener.take() {
+        task.abort();
+    }
+    let guard = db.lock().expect("db");
+    let (incognito, discovery, sync, audio) = switches(&guard);
+    let port = crate::config::load_config(&guard.app_dir)
+        .map(|config| config.listen_port)
+        .unwrap_or(0);
+    drop(guard);
+    if incognito || !(discovery || sync || audio) {
+        *actual_port = 0;
+        if let Ok(mut live) = live.inner.lock() {
+            live.listen_port = 0;
+        }
+        return;
+    }
+    let bind = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await;
+    let Ok(tcp) = bind else {
+        return;
+    };
+    *actual_port = tcp.local_addr().map(|addr| addr.port()).unwrap_or(0);
+    if let Ok(mut live) = live.inner.lock() {
+        live.listen_port = *actual_port;
+    }
+    let events = events.clone();
+    let db = db.clone();
+    let material = material.clone_parts();
+    let provider = provider.clone();
+    *listener = Some(tokio::task::spawn_local(async move {
+        loop {
+            let Ok((stream, _)) = tcp.accept().await else { break };
+            let events = events.clone();
+            let db = db.clone();
+            let material = material.clone();
+            let provider = provider.clone();
+            tokio::task::spawn_local(async move {
+                let _ = accept_lan(stream, db, material, provider, events).await;
+            });
+        }
+    }));
+}
+
+async fn accept_lan(
+    stream: TcpStream,
+    db: Arc<Mutex<Db>>,
+    material: IdentityParts,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    events: mpsc::UnboundedSender<NetEvent>,
+) -> AppResult<()> {
+    let verifier = Arc::new(tls::IdentityVerifier::peer(provider.clone(), None));
+    let config = tls::server_config(provider, &material.cert_der, &material.cert_key, verifier)
+        .map_err(|err| crate::error::AppError::Message(err.to_string()))?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let tls = acceptor.accept(stream).await.map_err(|err| crate::error::AppError::Message(err.to_string()))?;
+    let certs = tls.get_ref().1.peer_certificates().map(|certs| certs.to_vec()).unwrap_or_default();
+    let dialed_by = material.device_id.clone();
+    finish_handshake(tls, certs, db, material, events, "lan".into(), dialed_by, None).await
+}
+
+async fn dial_peer(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    provider: &Arc<rustls::crypto::CryptoProvider>,
+    events: &mpsc::UnboundedSender<NetEvent>,
+    host: String,
+    port: u16,
+    expected_device: Option<String>,
+    dialed_by: &str,
+) {
+    let events = events.clone();
+    let db = db.clone();
+    let parts = material.clone_parts();
+    let provider = provider.clone();
+    let dialed_by = dialed_by.to_string();
+    tokio::task::spawn_local(async move {
+        let target = format!("{host}:{port}");
+        let failed = |events: &mpsc::UnboundedSender<NetEvent>| {
+            let _ = events.send(NetEvent::DialFailed { device_id: expected_device.clone(), target: Some(target.clone()) });
+        };
+        let connect = TcpStream::connect((host.as_str(), port));
+        let stream = match tokio::time::timeout(Duration::from_secs(3), connect).await {
+            Ok(Ok(stream)) => stream,
+            _ => return failed(&events),
+        };
+        let expected = expected_device.as_ref().and_then(|id| ids::identity_bytes_from_app_id(id));
+        let verifier = Arc::new(tls::IdentityVerifier::peer(provider.clone(), expected));
+        let config = match tls::client_config(provider, &parts.cert_der, &parts.cert_key, verifier, None) {
+            Ok(config) => config,
+            Err(_) => return failed(&events),
+        };
+        let connector = TlsConnector::from(Arc::new(config));
+        let name = rustls::pki_types::ServerName::try_from("device.local").expect("name");
+        let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(5), connector.connect(name, stream)).await else {
+            return failed(&events);
+        };
+        let certs = tls.get_ref().1.peer_certificates().map(|certs| certs.to_vec()).unwrap_or_default();
+        if finish_handshake(tls, certs, db, parts, events.clone(), "lan".into(), dialed_by, Some(target.clone())).await.is_err() {
+            failed(&events);
+        }
+    });
+}
+
+async fn finish_handshake<S>(
+    stream: S,
+    certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    _db: Arc<Mutex<Db>>,
+    material: IdentityParts,
+    events: mpsc::UnboundedSender<NetEvent>,
+    path: String,
+    dialed_by: String,
+    target: Option<String>,
+) -> AppResult<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
+{
+    let peer_cert = certs.first().ok_or_else(|| crate::error::AppError::Message("missing peer cert".into()))?;
+    let identity_public = identity_of(peer_cert.as_ref())?;
+    if !identity::certificate_binds(peer_cert.as_ref(), &identity_public)? {
+        return Err(crate::error::AppError::Message("bad peer cert".into()));
+    }
+    let device_id = ids::app_device_id(&identity_public);
+    let conn = rand::random::<u64>();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (audio_tx, mut audio_rx) = mpsc::channel::<Frame>(48);
+    let _ = events.send(NetEvent::Connected {
+        device_id: device_id.clone(),
+        conn,
+        target,
+        dialed_by,
+        path,
+        writer: tx,
+        audio: audio_tx,
+        identity_public,
+        cert_der: peer_cert.as_ref().to_vec(),
+        name: device_id.clone(),
+    });
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let events_read = events.clone();
+    let device_read = device_id.clone();
+    tokio::task::spawn_local(async move {
+        loop {
+            match frames::read_frame(&mut reader).await {
+                Ok(frame) => {
+                    if events_read.send(NetEvent::Frame { device_id: device_read.clone(), frame }).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = events_read.send(NetEvent::Closed { device_id: device_read, conn });
+    });
+    tokio::task::spawn_local(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(45));
+        loop {
+            tokio::select! {
+                biased;
+                frame = rx.recv() => {
+                    let Some(frame) = frame else { break };
+                    if frames::write_frame(&mut writer, &frame).await.is_err() {
+                        break;
+                    }
+                }
+                Some(frame) = audio_rx.recv() => {
+                    if frames::write_frame(&mut writer, &frame).await.is_err() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    if frames::write_frame(&mut writer, &Frame::Keepalive).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let _ = material;
+    Ok(())
+}
+
+fn identity_of(cert_der: &[u8]) -> AppResult<Vec<u8>> {
+    let (_, cert) = x509_parser::parse_x509_certificate(cert_der)
+        .map_err(|err| crate::error::AppError::Message(err.to_string()))?;
+    for extension in cert.extensions() {
+        if extension.oid.to_id_string() == "1.3.6.1.4.1.55529.1" {
+            return Ok(extension.value.to_vec());
+        }
+    }
+    Err(crate::error::AppError::Message("no identity".into()))
+}
+
+fn adopt_connection(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    live: &Live,
+    peers: &mut HashMap<String, PeerOut>,
+    pending: &HashSet<String>,
+    app: &AppHandle,
+    device_id: String,
+    conn: u64,
+    dialed_by: String,
+    path: String,
+    writer: mpsc::UnboundedSender<Frame>,
+    audio: mpsc::Sender<Frame>,
+    identity_public: Vec<u8>,
+    cert_der: Vec<u8>,
+    name: String,
+) {
+    let known = db.lock().ok().and_then(|guard| {
+        guard.peers().ok().into_iter().flatten().find(|peer| peer.device_id == device_id)
+    });
+    let waiting = pending.contains(&device_id) || pending.iter().any(|item| item.starts_with("manual:"));
+    if known.is_none() && !waiting {
+        return;
+    }
+    if let Some(peer) = &known {
+        if peer.identity_public != identity_public {
+            return;
+        }
+    }
+    let name = live
+        .inner
+        .lock()
+        .ok()
+        .and_then(|guard| guard.nearby.iter().find(|item| item.device_id == device_id).map(|item| item.name.clone()))
+        .filter(|text| !text.is_empty())
+        .unwrap_or(name);
+    if let Some(existing) = peers.get(&device_id) {
+        let smaller = smaller_device(&material.device_id, &device_id);
+        let preferred = match smaller {
+            std::cmp::Ordering::Less => dialed_by == material.device_id,
+            _ => dialed_by == device_id,
+        };
+        let replaces_same_side = existing.dialed_by == dialed_by;
+        if !preferred && !replaces_same_side {
+            return;
+        }
+    }
+    let confirmed = known.is_some();
+    peers.insert(device_id.clone(), PeerOut {
+        device_id: device_id.clone(),
+        conn,
+        dialed_by,
+        confirmed,
+        path,
+        tx: writer,
+        audio,
+    });
+    if !confirmed {
+        stage_offer(db, material, live, &identity_public, &cert_der, &name, app);
+    }
+}
+
+fn stage_offer(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    live: &Live,
+    identity_public: &[u8],
+    cert_der: &[u8],
+    name: &str,
+    app: &AppHandle,
+) {
+    let Ok(remote_key) = libsignal_protocol::IdentityKey::decode(identity_public) else { return };
+    let number = identity::safety_number(material.identity.identity_key(), &remote_key).unwrap_or_default();
+    let device_id = ids::app_device_id(identity_public);
+    if let Ok(mut guard) = live.inner.lock() {
+        let shown = guard
+            .nearby
+            .iter()
+            .find(|item| item.device_id == device_id)
+            .map(|item| item.name.clone())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| if name.is_empty() || name == device_id { short_id(&device_id) } else { name.to_string() });
+        guard.offer = Some(PairingOffer {
+            device_id,
+            name: shown,
+            safety_number: number,
+            cert_der: cert_der.to_vec(),
+            identity_public: identity_public.to_vec(),
+            cert_id: ids::cert_id_display(cert_der),
+        });
+    }
+    let _ = db;
+    let _ = app.emit("network-updated", json!({}));
+}
+
+fn confirm_peer(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    live: &Live,
+    peers: &mut HashMap<String, PeerOut>,
+    device_id: &str,
+    app: &AppHandle,
+) {
+    let offer = live.inner.lock().ok().and_then(|guard| guard.offer.clone());
+    let Some(offer) = offer.filter(|offer| offer.device_id == device_id) else { return };
+    let number = offer.safety_number.clone();
+    if let Ok(guard) = db.lock() {
+        let _ = guard.upsert_peer(&crate::db::PeerRow {
+            device_id: offer.device_id.clone(),
+            identity_public: offer.identity_public,
+            cert_der: offer.cert_der,
+            cert_id: offer.cert_id,
+            display_name: offer.name,
+            safety_number: number,
+        });
+    }
+    if let Some(peer) = peers.get_mut(device_id) {
+        peer.confirmed = true;
+    }
+    if let Ok(mut guard) = live.inner.lock() {
+        guard.offer = None;
+    }
+    let _ = (material, app);
+}
+
+fn short_id(device_id: &str) -> String {
+    device_id.chars().take(7).collect()
+}
+
+/// Paired devices are listed even while offline. Unconfirmed connections show as pending.
+fn publish(app: &AppHandle, db: &Arc<Mutex<Db>>, live: &Live, peers: &HashMap<String, PeerOut>) {
+    let saved = db.lock().ok().and_then(|guard| guard.peers().ok()).unwrap_or_default();
+    if let Ok(mut guard) = live.inner.lock() {
+        let mut links: Vec<LinkStatus> = saved
+            .iter()
+            .map(|peer| {
+                let connected = peers.get(&peer.device_id);
+                let state = match connected {
+                    Some(out) if out.confirmed => "online",
+                    Some(_) => "pending",
+                    None if guard.failures.contains_key(&peer.device_id) => "failed",
+                    None => "offline",
+                };
+                LinkStatus {
+                    device_id: peer.device_id.clone(),
+                    name: if peer.display_name.is_empty() || peer.display_name == peer.device_id {
+                        short_id(&peer.device_id)
+                    } else {
+                        peer.display_name.clone()
+                    },
+                    state: state.into(),
+                    path: connected.map(|out| out.path.clone()).unwrap_or_default(),
+                    detail: connected
+                        .map(|out| if out.dialed_by == peer.device_id { "incoming".to_string() } else { "outgoing".to_string() })
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        for out in peers.values().filter(|out| !saved.iter().any(|peer| peer.device_id == out.device_id)) {
+            links.push(LinkStatus {
+                device_id: out.device_id.clone(),
+                name: short_id(&out.device_id),
+                state: "pending".into(),
+                path: out.path.clone(),
+                detail: String::new(),
+            });
+        }
+        links.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        guard.links = links;
+    }
+    let _ = app.emit("network-updated", json!({}));
+}
+
+fn nearby_of(live: &Live, device_id: &str) -> Option<Nearby> {
+    live.inner.lock().ok()?.nearby.iter().find(|item| item.device_id == device_id).cloned()
+}
+
+fn set_relay(live: &Live, text: &str) {
+    if let Ok(mut guard) = live.inner.lock() {
+        guard.relay = text.to_string();
+    }
+}
+
+async fn restart_discovery(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    port: u16,
+    events: &mpsc::UnboundedSender<NetEvent>,
+    mdns: &mut Option<mdns_sd::ServiceDaemon>,
+    live: &Live,
+) {
+    if let Some(daemon) = mdns.take() {
+        let _ = daemon.shutdown();
+    }
+    let guard = db.lock().expect("db");
+    let (incognito, discovery, _, _) = switches(&guard);
+    let name = guard.setting_string("displayName").unwrap_or_else(|_| "Device".into());
+    drop(guard);
+    if incognito || !discovery || port == 0 {
+        if let Ok(mut guard) = live.inner.lock() {
+            guard.nearby.clear();
+        }
+        return;
+    }
+    let Ok(daemon) = mdns_sd::ServiceDaemon::new() else { return };
+    let _ = daemon.disable_interface(mdns_sd::IfKind::IPv6);
+    let ips = ipv4_addrs();
+    if let Some(ip) = ips.first() {
+        let host = format!("{}.local.", material.device_id);
+        if let Ok(info) = mdns_sd::ServiceInfo::new(
+            "_devicemusic._tcp.local.",
+            &material.device_id,
+            &host,
+            &ip.to_string(),
+            port,
+            &[("id", material.device_id.as_str()), ("v", "1"), ("name", name.as_str())][..],
+        ) {
+            let _ = daemon.register(info);
+        }
+    }
+    let receiver = daemon.browse("_devicemusic._tcp.local.");
+    let events = events.clone();
+    let self_id = material.device_id.clone();
+    if let Ok(receiver) = receiver {
+        tokio::task::spawn_local(async move {
+            let mut found: HashMap<String, Nearby> = HashMap::new();
+            while let Ok(event) = receiver.recv_async().await {
+                if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
+                    let id = info.get_property_val_str("id").unwrap_or("").to_string();
+                    if id.is_empty() || id == self_id {
+                        continue;
+                    }
+                    let Some(addr) = info.get_addresses_v4().iter().next().cloned() else { continue };
+                    found.insert(id.clone(), Nearby {
+                        device_id: id,
+                        name: info.get_property_val_str("name").unwrap_or("").to_string(),
+                        host: addr.to_string(),
+                        port: info.get_port(),
+                    });
+                    let _ = events.send(NetEvent::Nearby(found.values().cloned().collect()));
+                }
+            }
+        });
+    }
+    *mdns = Some(daemon);
+}
+
+fn ipv4_addrs() -> Vec<Ipv4Addr> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|iface| match iface.addr {
+            if_addrs::IfAddr::V4(addr) if !addr.ip.is_loopback() => Some(addr.ip),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn restart_relay(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    provider: &Arc<rustls::crypto::CryptoProvider>,
+    events: &mpsc::UnboundedSender<NetEvent>,
+    task: &mut Option<tokio::task::JoinHandle<()>>,
+    live: &Live,
+) {
+    if let Some(task) = task.take() {
+        task.abort();
+    }
+    let guard = db.lock().expect("db");
+    if !relay_ready(&guard) {
+        set_relay(live, "");
+        return;
+    }
+    let host = guard.setting_string("relayHost").unwrap_or_default();
+    let port = guard.setting_i64("relayPort").unwrap_or(22067) as u16;
+    let relay_id = guard.setting_string("relayDeviceId").unwrap_or_default();
+    let token = guard.setting_string("relayToken").unwrap_or_default();
+    drop(guard);
+    let Some(expected) = ids::parse_cert_id(&relay_id) else {
+        set_relay(live, "badId");
+        return;
+    };
+    set_relay(live, "connecting");
+    let events = events.clone();
+    let material = material.clone_parts();
+    let provider = provider.clone();
+    *task = Some(tokio::task::spawn_local(async move {
+        let mut wait = 5;
+        loop {
+            let _ = events.send(NetEvent::RelayState("connecting".into()));
+            let started = Instant::now();
+            let parts = material.clone();
+            let result = relay_session(host.clone(), port, relay_id.clone(), expected, token.clone(), parts, provider.clone(), events.clone()).await;
+            if let Err(err) = result {
+                let _ = events.send(NetEvent::RelayState(format!("failed:{err}")));
+            }
+            if started.elapsed() > Duration::from_secs(120) {
+                wait = 5;
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            wait = (wait * 2).min(120);
+        }
+    }));
+}
+
+async fn relay_session(
+    host: String,
+    port: u16,
+    relay_id: String,
+    expected: [u8; 32],
+    token: String,
+    parts: IdentityParts,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    events: mpsc::UnboundedSender<NetEvent>,
+) -> Result<(), String> {
+    let addr = resolve_v4(&host, port).await?;
+    let stream = TcpStream::connect(addr).await.map_err(|err| err.to_string())?;
+    let verifier = Arc::new(tls::IdentityVerifier::relay(provider.clone(), expected));
+    let config = tls::client_config(provider, &parts.cert_der, &parts.cert_key, verifier, Some(b"bep-relay"))
+        .map_err(|err| err.to_string())?;
+    let connector = TlsConnector::from(Arc::new(config));
+    let name = rustls::pki_types::ServerName::try_from("relay.local").map_err(|err| err.to_string())?;
+    let mut tls = connector.connect(name, stream).await.map_err(|err| err.to_string())?;
+    let peer_certs = tls.get_ref().1.peer_certificates().map(|certs| certs.to_vec()).unwrap_or_default();
+    let cert = peer_certs.first().ok_or("missing relay certificate")?;
+    if !ids::same_cert_id(&relay_id, cert.as_ref()) || ids::cert_id_bytes(cert.as_ref()) != expected {
+        return Err("relay certificate id does not match".into());
+    }
+    relay::write_message(&mut tls, 2, &relay::join_relay(&token)).await.map_err(|err| err.to_string())?;
+    let (kind, body) = relay::read_message(&mut tls).await.map_err(|err| err.to_string())?;
+    if kind != 4 {
+        return Err("unexpected relay response".into());
+    }
+    let (code, message) = relay::parse_response(&body).map_err(|err| err.to_string())?;
+    if code != 0 && code != 2 {
+        return Err(message);
+    }
+    let _ = events.send(NetEvent::RelayState("registered".into()));
+    let mut ping = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            _ = ping.tick() => {
+                relay::write_message(&mut tls, 0, &[]).await.map_err(|err| err.to_string())?;
+            }
+            incoming = relay::read_message(&mut tls) => {
+                let (kind, body) = incoming.map_err(|err| err.to_string())?;
+                if kind == 1 {
+                    continue;
+                }
+                if kind == 6 {
+                    if let Ok(invitation) = relay::parse_invitation(&body) {
+                        let _ = events.send(NetEvent::Invitation(invitation));
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn resolve_v4(host: &str, port: u16) -> Result<SocketAddr, String> {
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        return Ok(SocketAddr::from((ip, port)));
+    }
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        return Err("Connection failed".into());
+    }
+    let mut addrs = tokio::net::lookup_host((host, port)).await.map_err(|err| err.to_string())?;
+    addrs.find(|addr| addr.is_ipv4()).ok_or_else(|| "Connection failed".into())
+}
+
+async fn maybe_relay_fallback(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    provider: &Arc<rustls::crypto::CryptoProvider>,
+    events: &mpsc::UnboundedSender<NetEvent>,
+    device_id: &str,
+) {
+    let guard = db.lock().expect("db");
+    if !relay_ready(&guard) {
+        return;
+    }
+    let Some(peer) = guard.peers().ok().into_iter().flatten().find(|peer| peer.device_id == device_id) else {
+        return;
+    };
+    let host = guard.setting_string("relayHost").unwrap_or_default();
+    let port = guard.setting_i64("relayPort").unwrap_or(22067) as u16;
+    let relay_id = guard.setting_string("relayDeviceId").unwrap_or_default();
+    drop(guard);
+    let Some(expected) = ids::parse_cert_id(&relay_id) else { return };
+    let Some(target) = ids::parse_cert_id(&peer.cert_id) else { return };
+    let parts = material.clone_parts();
+    let provider = provider.clone();
+    let events = events.clone();
+    tokio::task::spawn_local(async move {
+        let _ = request_relay_session(host, port, expected, target, parts, provider, events).await;
+    });
+}
+
+async fn request_relay_session(
+    host: String,
+    port: u16,
+    expected: [u8; 32],
+    target: [u8; 32],
+    parts: IdentityParts,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    events: mpsc::UnboundedSender<NetEvent>,
+) -> Result<(), String> {
+    let addr = resolve_v4(&host, port).await?;
+    let stream = TcpStream::connect(addr).await.map_err(|err| err.to_string())?;
+    let verifier = Arc::new(tls::IdentityVerifier::relay(provider.clone(), expected));
+    let config = tls::client_config(provider, &parts.cert_der, &parts.cert_key, verifier, Some(b"bep-relay"))
+        .map_err(|err| err.to_string())?;
+    let mut tls = TlsConnector::from(Arc::new(config))
+        .connect(rustls::pki_types::ServerName::try_from("relay.local").map_err(|err| err.to_string())?, stream)
+        .await
+        .map_err(|err| err.to_string())?;
+    relay::write_message(&mut tls, 5, &relay::connect_request(&target)).await.map_err(|err| err.to_string())?;
+    let (kind, body) = relay::read_message(&mut tls).await.map_err(|err| err.to_string())?;
+    if kind == 6 {
+        if let Ok(invitation) = relay::parse_invitation(&body) {
+            let _ = events.send(NetEvent::Invitation(invitation));
+        }
+    }
+    Ok(())
+}
+
+async fn join_invited(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    provider: &Arc<rustls::crypto::CryptoProvider>,
+    events: &mpsc::UnboundedSender<NetEvent>,
+    invitation: relay::Invitation,
+) {
+    let guard = db.lock().expect("db");
+    let host = guard.setting_string("relayHost").unwrap_or_default();
+    let port = guard.setting_i64("relayPort").unwrap_or(22067) as u16;
+    drop(guard);
+    let Ok(fallback) = resolve_v4(&host, port).await else { return };
+    if invitation.from.is_empty() {
+        return;
+    }
+    let Ok(target) = relay::invitation_target(&invitation, match fallback.ip() {
+        std::net::IpAddr::V4(ip) => ip,
+        _ => return,
+    }, fallback.port()) else { return };
+    let parts = material.clone_parts();
+    let provider = provider.clone();
+    let events = events.clone();
+    let db = db.clone();
+    tokio::task::spawn_local(async move {
+        let Ok(mut stream) = TcpStream::connect(target).await else { return };
+        if relay::write_message(&mut stream, 3, &relay::join_session(&invitation.key)).await.is_err() {
+            return;
+        }
+        let Ok((kind, body)) = relay::read_message(&mut stream).await else { return };
+        if kind != 4 {
+            return;
+        }
+        let Ok((code, _)) = relay::parse_response(&body) else { return };
+        if code != 0 {
+            return;
+        }
+        let expected = None;
+        let verifier = Arc::new(tls::IdentityVerifier::peer(provider.clone(), expected));
+        let dialed_by = parts.device_id.clone();
+        if invitation.server_socket {
+            let Ok(config) = tls::server_config(provider, &parts.cert_der, &parts.cert_key, verifier) else { return };
+            let Ok(tls) = tokio_rustls::TlsAcceptor::from(Arc::new(config)).accept(stream).await else { return };
+            let certs = tls.get_ref().1.peer_certificates().map(|certs| certs.to_vec()).unwrap_or_default();
+            let _ = finish_handshake(tls, certs, db, parts, events, "relay".into(), dialed_by, None).await;
+        } else {
+            let Ok(config) = tls::client_config(provider, &parts.cert_der, &parts.cert_key, verifier, None) else { return };
+            let Ok(name) = rustls::pki_types::ServerName::try_from("device.local") else { return };
+            let Ok(tls) = TlsConnector::from(Arc::new(config)).connect(name, stream).await else { return };
+            let certs = tls.get_ref().1.peer_certificates().map(|certs| certs.to_vec()).unwrap_or_default();
+            let _ = finish_handshake(tls, certs, db, parts, events, "relay".into(), dialed_by, None).await;
+        }
+    });
+}
+
+async fn handle_frame(
+    app: &AppHandle,
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    live: &Live,
+    bus: &AudioBus,
+    ready_sessions: &mut HashSet<String>,
+    published_holdings: &mut String,
+    device_id: &str,
+    frame: Frame,
+) {
+    let Some(peer) = peers.get(device_id) else { return };
+    if !peer.confirmed {
+        return;
+    }
+    match frame {
+        Frame::Keepalive => {}
+        Frame::Bundle(bytes) => {
+            if smaller_device(&material.device_id, device_id).is_lt() {
+                if let Ok(bundle) = decode_bundle(&bytes) {
+                    let remote = SignalStore::address_for(device_id);
+                    let local = SignalStore::address_for(&material.device_id);
+                    let mut sessions = store.clone();
+                    let mut identities = store.clone();
+                    let mut rng = rand::rng();
+                    if libsignal_protocol::process_prekey_bundle(
+                        &remote,
+                        &local,
+                        &mut sessions,
+                        &mut identities,
+                        &bundle,
+                        std::time::SystemTime::now(),
+                        &mut rng,
+                    ).await.is_ok() {
+                        session_ready(db, material, store, peers, ready_sessions, published_holdings, device_id).await;
+                    }
+                }
+            }
+        }
+        Frame::Signal(bytes) => {
+            if let Ok(message) = decode_ciphertext(&bytes) {
+                let remote = SignalStore::address_for(device_id);
+                let local = SignalStore::address_for(&material.device_id);
+                let mut sessions = store.clone();
+                let mut identities = store.clone();
+                let mut prekeys = store.clone();
+                let signed = store.clone();
+                let mut kyber = store.clone();
+                let mut rng = rand::rng();
+                if let Ok(plain) = libsignal_protocol::message_decrypt(
+                    &message,
+                    &remote,
+                    &local,
+                    &mut sessions,
+                    &mut identities,
+                    &mut prekeys,
+                    &signed,
+                    &mut kyber,
+                    &mut rng,
+                ).await {
+                    if smaller_device(&material.device_id, device_id).is_gt() {
+                        session_ready(db, material, store, peers, ready_sessions, published_holdings, device_id).await;
+                    }
+                    if accept_private(db, store, device_id, &plain).await {
+                        publish(app, db, live, peers);
+                    } else {
+                        apply_plain(app, db, live, device_id, &plain);
+                    }
+                }
+            } else if let Ok(plain) = libsignal_protocol::group_decrypt(&bytes, store, &SignalStore::address_for(device_id)).await {
+                apply_plain(app, db, live, device_id, &plain);
+            }
+        }
+        Frame::AudioReq { id, content_id, start, end } => {
+            serve_audio(db, peer, live, id, &content_id, start, end);
+        }
+        Frame::AudioChunk { id, offset, eof, data } => {
+            bus.deliver(id, AudioPiece::chunk(offset, eof, data));
+        }
+        Frame::AudioHead { id, total } => {
+            bus.deliver(id, AudioPiece::head(total));
+        }
+        Frame::AudioErr { id, reason } => {
+            bus.deliver(id, AudioPiece::failed(&reason));
+        }
+        Frame::AudioCancel { id } => {
+            if let Ok(mut guard) = live.inner.lock() {
+                guard.cancelled.insert(id);
+            }
+        }
+    }
+}
+
+/// Streams one byte range of a still-exposed local file. Exposure is re-checked per request.
+fn serve_audio(
+    db: &Arc<Mutex<Db>>,
+    peer: &PeerOut,
+    live: &Live,
+    id: u64,
+    content_id: &str,
+    start: u64,
+    end: Option<u64>,
+) {
+    let paths = db.lock().ok().and_then(|guard| readable_paths(&guard, content_id).ok()).unwrap_or_default();
+    let tx = peer.tx.clone();
+    let audio = peer.audio.clone();
+    let live = live.clone();
+    tokio::task::spawn_local(async move {
+        let mut opened = None;
+        let mut reason = "file.missing";
+        for (_, path) in &paths {
+            match File::open(path).and_then(|file| file.metadata().map(|meta| (file, meta.len()))) {
+                Ok(found) => {
+                    opened = Some(found);
+                    break;
+                }
+                Err(_) => reason = "file.unreadable",
+            }
+        }
+        let Some((mut file, total)) = opened else {
+            let _ = tx.send(Frame::AudioErr { id, reason: reason.into() });
+            return;
+        };
+        if start > total || file.seek(SeekFrom::Start(start)).is_err() {
+            let _ = tx.send(Frame::AudioErr { id, reason: "range".into() });
+            return;
+        }
+        if let Ok(mut guard) = live.inner.lock() {
+            guard.serving_count += 1;
+            guard.serving = true;
+        }
+        let _ = tx.send(Frame::AudioHead { id, total });
+        let stop = end.unwrap_or(total).min(total);
+        let mut offset = start;
+        let mut buf = vec![0u8; 24 * 1024];
+        loop {
+            if live.inner.lock().map(|mut guard| guard.cancelled.remove(&id)).unwrap_or(false) {
+                break;
+            }
+            if offset >= stop {
+                let _ = audio.send(Frame::AudioChunk { id, offset, eof: true, data: Vec::new() }).await;
+                break;
+            }
+            let max = ((stop - offset) as usize).min(buf.len());
+            let n = match file.read(&mut buf[..max]) {
+                Ok(n) => n,
+                Err(_) => {
+                    let _ = tx.send(Frame::AudioErr { id, reason: "file.unreadable".into() });
+                    break;
+                }
+            };
+            let eof = n == 0 || offset + n as u64 >= stop;
+            if audio.send(Frame::AudioChunk { id, offset, eof, data: buf[..n].to_vec() }).await.is_err() || eof {
+                break;
+            }
+            offset += n as u64;
+        }
+        if let Ok(mut guard) = live.inner.lock() {
+            guard.serving_count = guard.serving_count.saturating_sub(1);
+            guard.serving = guard.serving_count > 0;
+        }
+    });
+}
+
+fn apply_plain(app: &AppHandle, db: &Arc<Mutex<Db>>, live: &Live, device_id: &str, plain: &[u8]) {
+    let Ok(value) = serde_json::from_slice::<Value>(plain) else { return };
+    let payload = value.get("payload").cloned().unwrap_or(value.clone());
+    if !verify_author(db, device_id, &value) {
+        return;
+    }
+    let value = payload;
+    let Ok(guard) = db.lock() else { return };
+    let kind = value.get("kind").and_then(|item| item.as_str()).unwrap_or("");
+    match kind {
+        "holdings" => {
+            let revision = value.get("revision").and_then(|item| item.as_i64()).unwrap_or(0);
+            let rows = value.get("rows").and_then(|item| serde_json::from_value::<Vec<HoldingInput>>(item.clone()).ok()).unwrap_or_default();
+            let _ = guard.replace_peer_holdings(device_id, revision, &rows);
+        }
+        "history" => {
+            if !data_sync_open(&guard) {
+                return;
+            }
+            let blocks = guard.block_flags("history").unwrap_or(crate::db::BlockFlags { manual: false, source: false, timestamp: false, all: false });
+            let mode = guard.setting_string("historySyncMode").unwrap_or_else(|_| "utc".into());
+            if blocks.timestamp || blocks.all || mode != "utc" {
+                return;
+            }
+            let entries = value.get("entries").and_then(|item| item.as_array()).cloned().unwrap_or_default();
+            let parsed = entries.iter().filter_map(|item| {
+                let content_id = item.get("contentId")?.as_str()?.to_string();
+                let at = chrono::DateTime::parse_from_rfc3339(item.get("at")?.as_str()?).ok()?;
+                Some(HistoryEntry { content_id, at: at.with_timezone(&chrono::Utc) })
+            }).collect();
+            let _ = merge_history_into_db(&guard, parsed);
+        }
+        "snapshot" => {
+            if !data_sync_open(&guard) {
+                return;
+            }
+            let feature = value.get("feature").and_then(|item| item.as_str()).unwrap_or("").to_string();
+            if !crate::db::FEATURES.contains(&feature.as_str()) {
+                return;
+            }
+            let revision = value.get("revision").and_then(|item| item.as_i64()).unwrap_or(0);
+            let manual = value.get("manual").and_then(|item| item.as_bool()).unwrap_or(false);
+            let items = value.get("items").cloned().unwrap_or(json!([]));
+            if !sync_logic::should_apply_revision(guard.applied_revision(&feature, device_id).unwrap_or(0), revision) {
+                return;
+            }
+            if !manual {
+                let blocks = guard.block_flags(&feature).unwrap_or(crate::db::BlockFlags { manual: false, source: false, timestamp: false, all: false });
+                let source = guard.sync_source(&feature).unwrap_or(None);
+                if blocks.source || blocks.all || source.as_deref() != Some(device_id) {
+                    return;
+                }
+                if guard.is_dirty(&feature).unwrap_or(false) {
+                    let mut waiting = guard.setting_json("pendingSnapshots").unwrap_or(json!({}));
+                    if !waiting.is_object() {
+                        waiting = json!({});
+                    }
+                    waiting[&feature] = json!({"source": device_id, "revision": revision, "items": items});
+                    let _ = guard.set_device_setting("pendingSnapshots", waiting);
+                    drop(guard);
+                    let _ = app.emit("network-updated", json!({}));
+                    return;
+                }
+            }
+            let _ = guard.record_snapshot(&feature, device_id, revision, &items.to_string());
+            apply_snapshot_payload(app, &guard, &feature, &items);
+            let _ = guard.mark_dirty(&feature, false);
+            clear_pending(&guard, &feature);
+        }
+        "position" => {
+            let content_id = value.get("contentId").and_then(|item| item.as_str()).unwrap_or("");
+            let seconds = value.get("seconds").and_then(|item| item.as_f64()).unwrap_or(0.0);
+            let mut state = guard.player_json().unwrap_or(json!({}));
+            let current = state.get("current").and_then(|item| item.get("contentId")).and_then(|item| item.as_str()).unwrap_or("");
+            let paused = live.inner.lock().map(|guard| !guard.playing).unwrap_or(true);
+            if current == content_id && paused {
+                state["positionSec"] = json!(seconds);
+                let _ = guard.save_player_json(&state);
+            }
+        }
+        _ => {}
+    }
+    drop(guard);
+    let _ = app.emit("library-updated", json!({}));
+}
+
+async fn send_sync(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    feature: &str,
+    refresh: bool,
+) {
+    let guard = db.lock().expect("db");
+    if !data_sync_open(&guard) {
+        return;
+    }
+    let blocks = guard.block_flags(feature).unwrap_or(crate::db::BlockFlags { manual: false, source: false, timestamp: false, all: false });
+    if blocks.manual || blocks.all {
+        return;
+    }
+    if let Some(source) = guard.sync_source(feature).unwrap_or(None) {
+        if source != material.device_id && !refresh {
+            return;
+        }
+    }
+    let revision = guard.bump_feature_revision(feature).unwrap_or(1);
+    let items = snapshot_items(&guard, feature);
+    let body = json!({"kind": "snapshot", "feature": feature, "revision": revision, "manual": true, "items": items});
+    let _ = guard.mark_dirty(feature, false);
+    drop(guard);
+    seal_and_send(material, store, peers, &body).await;
+}
+
+/// A device that is its own sync source sends each local change. History in time-merge mode sends the trimmed list.
+async fn auto_sync(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    feature: &str,
+) {
+    if peers.values().all(|peer| !peer.confirmed) {
+        return;
+    }
+    let Some(body) = db.lock().ok().and_then(|guard| auto_body(&guard, &material.device_id, feature, true)) else { return };
+    seal_and_send(material, store, peers, &body).await;
+}
+
+fn auto_body(db: &Db, self_id: &str, feature: &str, bump: bool) -> Option<Value> {
+    if !data_sync_open(db) {
+        return None;
+    }
+    let blocks = db.block_flags(feature).ok()?;
+    if blocks.all {
+        return None;
+    }
+    if feature == "history" {
+        let mode = db.setting_string("historySyncMode").unwrap_or_else(|_| "utc".into());
+        if mode == "utc" {
+            if blocks.timestamp {
+                return None;
+            }
+            let entries = db
+                .history_for_sync()
+                .ok()?
+                .into_iter()
+                .map(|entry| json!({"contentId": entry.content_id, "at": entry.at.to_rfc3339()}))
+                .collect::<Vec<_>>();
+            return Some(json!({"kind": "history", "entries": entries}));
+        }
+    }
+    if db.sync_source(feature).ok()?.as_deref() != Some(self_id) {
+        return None;
+    }
+    let revision = if bump { db.bump_feature_revision(feature).ok()? } else { db.feature_revision(feature).ok()? };
+    let items = snapshot_items(db, feature);
+    let _ = db.mark_dirty(feature, false);
+    Some(json!({"kind": "snapshot", "feature": feature, "revision": revision, "manual": false, "items": items}))
+}
+
+fn clear_pending(db: &Db, feature: &str) {
+    let mut waiting = db.setting_json("pendingSnapshots").unwrap_or(json!({}));
+    if let Some(map) = waiting.as_object_mut() {
+        if map.remove(feature).is_some() {
+            let _ = db.set_device_setting("pendingSnapshots", waiting);
+        }
+    }
+}
+
+/// The follower chose between its unsynced local copy and the source's snapshot.
+fn resolve_pending(app: &AppHandle, db: &Arc<Mutex<Db>>, feature: &str, take: bool) {
+    let Ok(guard) = db.lock() else { return };
+    let waiting = guard.setting_json("pendingSnapshots").unwrap_or(json!({}));
+    let Some(item) = waiting.get(feature).cloned() else { return };
+    if take {
+        let source = item.get("source").and_then(|value| value.as_str()).unwrap_or("").to_string();
+        let revision = item.get("revision").and_then(|value| value.as_i64()).unwrap_or(0);
+        let items = item.get("items").cloned().unwrap_or(json!([]));
+        let _ = guard.record_snapshot(feature, &source, revision, &items.to_string());
+        apply_snapshot_payload(app, &guard, feature, &items);
+        let _ = guard.mark_dirty(feature, false);
+    }
+    clear_pending(&guard, feature);
+    drop(guard);
+    let _ = app.emit("library-updated", json!({}));
+}
+
+async fn send_sender_key(
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    device_id: &str,
+) {
+    let sender = SignalStore::address_for(&material.device_id);
+    let mut rng = rand::rng();
+    if let Ok(message) = libsignal_protocol::create_sender_key_distribution_message(&sender, material.distribution_id, store, &mut rng).await {
+        send_private(material, store, peers, device_id, &json!({
+            "kind": "skdm",
+            "bytes": b64_bytes(message.serialized()),
+        })).await;
+    }
+}
+
+async fn send_position(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    content_id: &str,
+    seconds: f64,
+) {
+    let enabled = db.lock().ok().and_then(|guard| guard.setting_bool("positionSync").ok()).unwrap_or(false);
+    if !enabled || content_id.is_empty() {
+        return;
+    }
+    let body = json!({"kind": "position", "contentId": content_id, "seconds": seconds});
+    seal_and_send(material, store, peers, &body).await;
+}
+
+async fn seal_and_send(
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    body: &Value,
+) {
+    let payload = serde_json::to_vec(body).unwrap_or_default();
+    let mut rng = rand::rng();
+    let Ok(signature) = material.identity.private_key().calculate_signature(&payload, &mut rng) else { return };
+    let envelope = json!({
+        "author": material.device_id,
+        "signature": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, signature.as_ref()),
+        "payload": body,
+    });
+    let plain = serde_json::to_vec(&envelope).unwrap_or_default();
+    let sender = SignalStore::address_for(&material.device_id);
+    if let Ok(message) = libsignal_protocol::group_encrypt(store, &sender, material.distribution_id, &plain, &mut rng).await {
+        let frame = Frame::Signal(message.serialized().to_vec());
+        for peer in peers.values().filter(|peer| peer.confirmed) {
+            let _ = peer.tx.send(frame.clone());
+        }
+    }
+}
+
+fn data_sync_open(db: &Db) -> bool {
+    !db.setting_bool("incognito").unwrap_or(true) && db.setting_bool("syncEnabled").unwrap_or(false)
+}
+
+fn snapshot_items(db: &Db, feature: &str) -> Value {
+    match feature {
+        "favorites" => json!(db.favorite_content_ids().unwrap_or_default()),
+        "theme" | "language" => json!(db.synced(feature).unwrap_or_default()),
+        "playlists" => db.playlist_snapshot().unwrap_or(json!([])),
+        "queue" => json!(db
+            .queue_items_from_state()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|item| match item {
+                QueueItem::Content(id) => Some(id),
+                QueueItem::Local(_) => None,
+            })
+            .collect::<Vec<_>>()),
+        "history" => json!(db
+            .history_for_sync()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| json!({"contentId": entry.content_id, "at": entry.at.to_rfc3339()}))
+            .collect::<Vec<_>>()),
+        _ => json!([]),
+    }
+}
+
+fn apply_snapshot_payload(app: &AppHandle, db: &Db, feature: &str, items: &Value) {
+    match feature {
+        "playlists" => {
+            let _ = db.apply_playlist_snapshot(items);
+        }
+        "history" => {
+            let entries = items
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|item| {
+                            let content_id = item.get("contentId")?.as_str()?.to_string();
+                            let at = chrono::DateTime::parse_from_rfc3339(item.get("at")?.as_str()?).ok()?;
+                            Some(HistoryEntry { content_id, at: at.with_timezone(&chrono::Utc) })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let cap = db.setting_i64("historyCap").unwrap_or(100).max(1) as usize;
+            let merged = sync_logic::merge_history(Vec::new(), entries, chrono::Utc::now(), cap);
+            let _ = db.replace_synced_history(&merged);
+        }
+        "favorites" => {
+            let ids = items.as_array().map(|rows| rows.iter().filter_map(|item| item.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
+            let existing = db.content_member_refs("favorites", None).unwrap_or_default();
+            let kept = sync_logic::apply_member_snapshot(&existing, &ids);
+            let _ = db.conn.execute("DELETE FROM favorites", []);
+            for member in kept {
+                let _ = db.conn.execute(
+                    "INSERT INTO favorites(content_id, local_file_id) VALUES(?1, ?2)",
+                    rusqlite::params![member.content_id, member.local_file_id],
+                );
+            }
+        }
+        "theme" | "language" => {
+            if let Some(text) = items.as_str() {
+                let _ = db.set_synced(feature, text);
+            }
+        }
+        "queue" => {
+            let ids = items.as_array().map(|rows| {
+                rows.iter().filter_map(|item| {
+                    item.as_str().map(str::to_string).or_else(|| item.get("contentId").and_then(|value| value.as_str()).map(str::to_string))
+                }).collect::<Vec<_>>()
+            }).unwrap_or_default();
+            let future = db.queue_items_from_state().unwrap_or_default();
+            let current = db.current_content_from_state().unwrap_or(None);
+            let next = sync_logic::apply_queue_snapshot(&future, current.as_deref(), &ids);
+            let mut state = db.player_json().unwrap_or(json!({}));
+            crate::db::apply_queue_state(&mut state, &next);
+            let _ = db.save_player_json(&state);
+            let _ = app.emit("queue-updated", state.get("future").cloned().unwrap_or(json!([])));
+        }
+        _ => {}
+    }
+}
+
+fn verify_author(db: &Arc<Mutex<Db>>, device_id: &str, envelope: &Value) -> bool {
+    let Some(payload) = envelope.get("payload") else { return false };
+    let Some(signature) = envelope.get("signature").and_then(|item| item.as_str()) else { return false };
+    if envelope.get("author").and_then(|item| item.as_str()) != Some(device_id) {
+        return false;
+    }
+    let Ok(signature) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, signature) else { return false };
+    let Ok(bytes) = serde_json::to_vec(payload) else { return false };
+    let Ok(guard) = db.lock() else { return false };
+    let Ok(peers) = guard.peers() else { return false };
+    let Some(peer) = peers.into_iter().find(|peer| peer.device_id == device_id) else { return false };
+    let Ok(identity) = libsignal_protocol::IdentityKey::decode(&peer.identity_public) else { return false };
+    identity.public_key().verify_signature(&bytes, &signature)
+}
+
+fn trust_saved_peers(db: &Arc<Mutex<Db>>, store: &mut SignalStore) {
+    let Ok(guard) = db.lock() else { return };
+    let Ok(peers) = guard.peers() else { return };
+    for peer in peers {
+        store.trust(&peer.device_id, &peer.identity_public);
+    }
+}
+
+async fn send_bundle(db: &Arc<Mutex<Db>>, store: &mut SignalStore, peers: &HashMap<String, PeerOut>, device_id: &str) {
+    let _ = db;
+    let Ok(bundle) = store.ensure_prekeys().await else { return };
+    let Ok(identity) = bundle.identity_key() else { return };
+    let Ok(signed_public) = bundle.signed_pre_key_public() else { return };
+    let Ok(signed_signature) = bundle.signed_pre_key_signature() else { return };
+    let Ok(kyber_public) = bundle.kyber_pre_key_public() else { return };
+    let Ok(kyber_signature) = bundle.kyber_pre_key_signature() else { return };
+    let body = json!({
+        "identity": b64_bytes(&identity.serialize()),
+        "signedPublic": b64_bytes(&signed_public.serialize()),
+        "signedSignature": b64_bytes(signed_signature),
+        "kyberPublic": b64_bytes(&kyber_public.serialize()),
+        "kyberSignature": b64_bytes(kyber_signature),
+        "registrationId": bundle.registration_id().unwrap_or(1),
+    });
+    if let Some(peer) = peers.get(device_id) {
+        let _ = peer.tx.send(Frame::Bundle(serde_json::to_vec(&body).unwrap_or_default()));
+    }
+}
+
+async fn session_ready(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    ready_sessions: &mut HashSet<String>,
+    published_holdings: &mut String,
+    device_id: &str,
+) {
+    if !ready_sessions.insert(device_id.to_string()) {
+        return;
+    }
+    let name = db.lock().ok().and_then(|guard| guard.setting_string("displayName").ok()).unwrap_or_default();
+    send_private(material, store, peers, device_id, &json!({"kind": "hello", "name": name})).await;
+    send_sender_key(material, store, peers, device_id).await;
+    // The reconnecting peer needs the full current state even when nothing changed here.
+    let catch_up = db.lock().ok().map(|guard| {
+        let mut bodies = Vec::new();
+        let rows = local_publishable(&guard).unwrap_or_default();
+        let revision = guard.our_holdings_revision().unwrap_or(0).max(1);
+        bodies.push(json!({"kind": "holdings", "revision": revision, "rows": rows}));
+        for feature in crate::db::FEATURES {
+            if let Some(body) = auto_body(&guard, &material.device_id, feature, false) {
+                bodies.push(body);
+            }
+        }
+        bodies
+    }).unwrap_or_default();
+    for body in catch_up {
+        send_private_signed(material, store, peers, device_id, &body).await;
+    }
+    publish_holdings(db, material, store, peers, published_holdings).await;
+}
+
+async fn send_private_signed(
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    device_id: &str,
+    body: &Value,
+) {
+    let payload = serde_json::to_vec(body).unwrap_or_default();
+    let mut rng = rand::rng();
+    let Ok(signature) = material.identity.private_key().calculate_signature(&payload, &mut rng) else { return };
+    let envelope = json!({
+        "author": material.device_id,
+        "signature": b64_bytes(signature.as_ref()),
+        "payload": body,
+    });
+    send_private(material, store, peers, device_id, &envelope).await;
+}
+
+async fn send_private(
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    device_id: &str,
+    body: &Value,
+) {
+    let Some(peer) = peers.get(device_id) else { return };
+    let plain = serde_json::to_vec(body).unwrap_or_default();
+    let remote = SignalStore::address_for(device_id);
+    let local = SignalStore::address_for(&material.device_id);
+    let mut sessions = store.clone();
+    let mut identities = store.clone();
+    let mut rng = rand::rng();
+    if let Ok(message) = libsignal_protocol::message_encrypt(
+        &plain,
+        &remote,
+        &local,
+        &mut sessions,
+        &mut identities,
+        std::time::SystemTime::now(),
+        &mut rng,
+    ).await {
+        let _ = peer.tx.send(Frame::Signal(message.serialize().to_vec()));
+    }
+}
+
+async fn accept_private(db: &Arc<Mutex<Db>>, store: &mut SignalStore, device_id: &str, plain: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(plain) else { return false };
+    match value.get("kind").and_then(|item| item.as_str()) {
+        Some("hello") => {
+            let name = value.get("name").and_then(|item| item.as_str()).unwrap_or("").trim().chars().take(64).collect::<String>();
+            if !name.is_empty() {
+                let _ = db.lock().map(|guard| guard.rename_peer(device_id, &name));
+            }
+            return true;
+        }
+        Some("skdm") => {}
+        _ => return false,
+    }
+    let Some(text) = value.get("bytes").and_then(|item| item.as_str()) else { return true };
+    let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, text) else { return true };
+    if let Ok(message) = libsignal_protocol::SenderKeyDistributionMessage::try_from(bytes.as_slice()) {
+        let _ = libsignal_protocol::process_sender_key_distribution_message(
+            &SignalStore::address_for(device_id),
+            &message,
+            store,
+        ).await;
+    }
+    true
+}
+
+async fn publish_holdings(
+    db: &Arc<Mutex<Db>>,
+    material: &IdentityMaterial,
+    store: &mut SignalStore,
+    peers: &HashMap<String, PeerOut>,
+    published_holdings: &mut String,
+) {
+    if peers.values().all(|peer| !peer.confirmed) {
+        return;
+    }
+    let guard = db.lock().expect("db");
+    let rows = local_publishable(&guard).unwrap_or_default();
+    let fingerprint = serde_json::to_string(&rows).unwrap_or_default();
+    if fingerprint == *published_holdings {
+        return;
+    }
+    let revision = guard.our_holdings_revision().unwrap_or(0) + 1;
+    let _ = guard.set_holdings_revision(revision);
+    drop(guard);
+    *published_holdings = fingerprint;
+    let body = json!({"kind": "holdings", "revision": revision, "rows": rows});
+    seal_and_send(material, store, peers, &body).await;
+}
+
+fn b64_bytes(bytes: &[u8]) -> String {
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+}
+
+async fn start_download(
+    app: &AppHandle,
+    db: &Arc<Mutex<Db>>,
+    peers: &HashMap<String, PeerOut>,
+    live: &Live,
+    bus: &Arc<AudioBus>,
+    content_id: String,
+) {
+    let set_status = |content_id: &str, state: &str, detail: &str| {
+        if let Ok(mut status) = live.inner.lock() {
+            status.download = Some(DownloadStatus { content_id: content_id.to_string(), state: state.into(), detail: detail.into() });
+        }
+        let _ = app.emit("network-updated", json!({}));
+    };
+    if live.inner.lock().map(|guard| guard.download.as_ref().is_some_and(|item| item.state == "started")).unwrap_or(false) {
+        return set_status(&content_id, "busy", "");
+    }
+    let guard = db.lock().expect("db");
+    if guard.setting_bool("incognito").unwrap_or(false) {
+        drop(guard);
+        return set_status(&content_id, "failed", "notice.offlineTrack");
+    }
+    let folder = guard.setting_string("downloadFolder").unwrap_or_default();
+    if folder.is_empty() {
+        drop(guard);
+        return set_status(&content_id, "need-folder", "");
+    }
+    let holders: Vec<(String, String, String)> = {
+        let mut stmt = guard.conn.prepare(
+            "SELECT device_id, COALESCE(title, ''), COALESCE(codec, '') FROM holdings WHERE content_id = ?1",
+        ).ok();
+        stmt.as_mut().and_then(|stmt| {
+            stmt.query_map(rusqlite::params![content_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            }).ok().and_then(|rows| rows.collect::<Result<Vec<_>, _>>().ok())
+        }).unwrap_or_default()
+    };
+    drop(guard);
+    let sources = holders.iter().filter(|row| peers.get(&row.0).is_some_and(|peer| peer.confirmed)).map(|row| PlaySource {
+        device_id: row.0.clone(),
+        path_id: content_id.clone(),
+        kind: SourceKind::Remote,
+    }).collect::<Vec<_>>();
+    let senders: Vec<(PlaySource, mpsc::UnboundedSender<Frame>)> = sources
+        .iter()
+        .filter_map(|source| peers.get(&source.device_id).map(|peer| (source.clone(), peer.tx.clone())))
+        .collect();
+    let SourceChoice::Play(first) = choose_download_source(&sources, None) else {
+        return set_status(&content_id, "failed", "notice.offlineTrack");
+    };
+    set_status(&content_id, "started", &folder);
+    let title = holders.iter().find(|row| row.0 == first.device_id && !row.1.is_empty()).map(|row| row.1.clone()).unwrap_or_default();
+    let codec = holders.iter().find(|row| row.0 == first.device_id).map(|row| row.2.clone()).unwrap_or_else(|| "audio".into());
+    let app = app.clone();
+    let db = db.clone();
+    let live = live.clone();
+    let bus = bus.clone();
+    tokio::task::spawn_local(async move {
+        let mut attempt = Some(first);
+        let mut bytes = Vec::new();
+        let mut ok = false;
+        while let Some(source) = attempt.take() {
+            let Some((_, sender)) = senders.iter().find(|(item, _)| item == &source) else { break };
+            let id = rand::random::<u64>();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            bus.register(id, tx);
+            let _ = sender.send(Frame::AudioReq { id, content_id: content_id.clone(), start: 0, end: None });
+            bytes.clear();
+            let mut failed = false;
+            loop {
+                let piece = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await;
+                let Ok(Some(piece)) = piece else { failed = true; break };
+                if piece.error.is_some() {
+                    failed = true;
+                    break;
+                }
+                let at = piece.offset as usize;
+                if bytes.len() < at {
+                    bytes.resize(at, 0);
+                }
+                bytes.truncate(at);
+                bytes.extend_from_slice(&piece.data);
+                if piece.eof {
+                    break;
+                }
+            }
+            bus.finish(id);
+            if !failed && blake3::hash(&bytes).to_hex().as_str() == content_id {
+                ok = true;
+                break;
+            }
+            let sources: Vec<PlaySource> = senders.iter().map(|(item, _)| item.clone()).collect();
+            if let SourceChoice::Play(next) = choose_download_source(&sources, Some(&source)) {
+                attempt = Some(next);
+            }
+        }
+        let finish = |state: &str, detail: &str| {
+            if let Ok(mut status) = live.inner.lock() {
+                status.download = Some(DownloadStatus { content_id: content_id.clone(), state: state.into(), detail: detail.into() });
+            }
+        };
+        if !ok {
+            finish("failed", "");
+            let _ = app.emit("network-updated", json!({}));
+            return;
+        }
+        while live.inner.lock().map(|guard| guard.playing || guard.serving).unwrap_or(false) {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        let directory = PathBuf::from(&folder);
+        let _ = std::fs::create_dir_all(&directory);
+        let name = download_name(&title, &codec, &content_id);
+        let temp = directory.join(format!(".device-music-download-{content_id}.part"));
+        let final_path = unique_path(&directory, &name);
+        let saved = std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, &final_path));
+        if saved.is_err() {
+            let _ = std::fs::remove_file(&temp);
+            finish("failed", &folder);
+        } else {
+            if crate::scan::import_path(&db, &directory, "directory").is_ok() {
+                use tauri::Manager;
+                let _ = app.asset_protocol_scope().allow_directory(&directory, true);
+            }
+            finish("saved", &final_path.to_string_lossy());
+        }
+        let _ = app.emit("library-updated", json!({}));
+        let _ = app.emit("network-updated", json!({}));
+    });
+}
+
+fn download_name(title: &str, codec: &str, content_id: &str) -> String {
+    let clean = title.chars().map(|ch| if "\\/:*?\"<>|".contains(ch) { '_' } else { ch }).collect::<String>();
+    let stem = if clean.trim().is_empty() { content_id } else { clean.trim() };
+    let ext = match codec {
+        "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "aiff" => codec,
+        _ => "audio",
+    };
+    format!("{stem}.{ext}")
+}
+
+fn unique_path(directory: &PathBuf, name: &str) -> PathBuf {
+    let direct = directory.join(name);
+    if !direct.exists() {
+        return direct;
+    }
+    let path = std::path::Path::new(name);
+    let stem = path.file_stem().and_then(|text| text.to_str()).unwrap_or("track");
+    let ext = path.extension().and_then(|text| text.to_str()).unwrap_or("audio");
+    for index in 2..1000 {
+        let candidate = directory.join(format!("{stem} ({index}).{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    directory.join(name)
+}
+
+fn decode_bundle(bytes: &[u8]) -> AppResult<libsignal_protocol::PreKeyBundle> {
+    let value: Value = serde_json::from_slice(bytes)?;
+    let b64 = |key: &str| {
+        base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            value.get(key).and_then(|item| item.as_str()).unwrap_or(""),
+        ).map_err(|err| crate::error::AppError::Message(err.to_string()))
+    };
+    let identity = libsignal_protocol::IdentityKey::decode(&b64("identity")?).map_err(|err| crate::error::AppError::Message(err.to_string()))?;
+    let signed_public = libsignal_protocol::PublicKey::deserialize(&b64("signedPublic")?).map_err(|err| crate::error::AppError::Message(err.to_string()))?;
+    let kyber_public = libsignal_protocol::kem::PublicKey::deserialize(&b64("kyberPublic")?).map_err(|err| crate::error::AppError::Message(err.to_string()))?;
+    libsignal_protocol::PreKeyBundle::new(
+        value.get("registrationId").and_then(|item| item.as_u64()).unwrap_or(1) as u32,
+        libsignal_protocol::DeviceId::new(1).expect("id"),
+        None,
+        libsignal_protocol::SignedPreKeyId::from(1u32),
+        signed_public,
+        b64("signedSignature")?,
+        libsignal_protocol::KyberPreKeyId::from(1u32),
+        kyber_public,
+        b64("kyberSignature")?,
+        identity,
+    ).map_err(|err| crate::error::AppError::Message(err.to_string()))
+}
+
+fn decode_ciphertext(bytes: &[u8]) -> Result<libsignal_protocol::CiphertextMessage, ()> {
+    if bytes.is_empty() {
+        return Err(());
+    }
+    match bytes[0] & 0x0f {
+        2 => libsignal_protocol::SignalMessage::try_from(bytes).map(libsignal_protocol::CiphertextMessage::SignalMessage).map_err(|_| ()),
+        3 => libsignal_protocol::PreKeySignalMessage::try_from(bytes).map(libsignal_protocol::CiphertextMessage::PreKeySignalMessage).map_err(|_| ()),
+        _ => Err(()),
+    }
+}
+
+#[derive(Clone)]
+struct IdentityParts {
+    device_id: String,
+    cert_der: Vec<u8>,
+    cert_key: Vec<u8>,
+}
+
+impl IdentityMaterial {
+    fn clone_parts(&self) -> IdentityParts {
+        IdentityParts {
+            device_id: self.device_id.clone(),
+            cert_der: self.cert_der.clone(),
+            cert_key: self.cert_key_pkcs8.clone(),
+        }
+    }
+}
+
+pub fn choose_download_source(sources: &[PlaySource], failed: Option<&PlaySource>) -> SourceChoice {
+    sync_logic::select_source(sources, sync_logic::FailureClass::Transport, failed, false)
+}
