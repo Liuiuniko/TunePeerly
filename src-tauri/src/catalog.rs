@@ -1,0 +1,339 @@
+use std::collections::{HashMap, HashSet};
+
+use rusqlite::params;
+use serde_json::{json, Value};
+
+use crate::db::{Db, TrackStub};
+use crate::error::AppResult;
+
+#[derive(Debug, Clone)]
+struct LocalRow {
+    local_file_id: String,
+    content_id: Option<String>,
+    title: String,
+    artist: String,
+    album: String,
+    track_number: Option<i64>,
+    duration_ms: Option<i64>,
+    folder: String,
+    file_name: String,
+    added_at: String,
+    exposed: bool,
+    access_status: String,
+    metadata_status: String,
+    playback_status: String,
+    playback_reason: Option<String>,
+    access_reason: Option<String>,
+    video: bool,
+    cover_path: Option<String>,
+    absolute_path: String,
+    favorite: bool,
+    unplayable: bool,
+}
+
+pub fn library(db: &Db, online: &[String]) -> AppResult<Value> {
+    let local = load_local(db)?;
+    let holdings = load_holdings(db)?;
+    let online: HashSet<&str> = online.iter().map(String::as_str).collect();
+    let mut tracks = Vec::new();
+    let mut seen_content = HashSet::new();
+
+    let mut by_content: HashMap<String, Vec<&LocalRow>> = HashMap::new();
+    for row in &local {
+        if let Some(content_id) = &row.content_id {
+            by_content.entry(content_id.clone()).or_default().push(row);
+        } else {
+            let badge = if row.access_status == "available" { "local" } else { "unavailable" };
+            tracks.push(stub_from_local(row, &[], badge));
+        }
+    }
+    for (content_id, rows) in &by_content {
+        seen_content.insert(content_id.clone());
+        let holders = holders_of(&holdings, content_id, &online);
+        let readable = rows.iter().find(|row| row.access_status == "available" && !row.video);
+        let any_video = rows.iter().all(|row| row.video);
+        let unplayable = rows.iter().any(|row| row.unplayable);
+        let badge = if readable.is_some() && !any_video {
+            "local"
+        } else if !unplayable && !holders.is_empty() && !any_video {
+            "remote"
+        } else if readable.is_some() {
+            "local"
+        } else {
+            "unavailable"
+        };
+        let source = readable.copied().unwrap_or(rows[0]);
+        let mut stub = stub_from_local(source, &holders, badge);
+        // A readable local copy is always retried, even after a confirmed decode failure.
+        stub.playable = (badge == "local" && !source.video && source.access_status == "available")
+            || (badge == "remote" && !unplayable);
+        stub.dimmed = badge == "unavailable" || source.access_status != "available";
+        if source.video {
+            stub.reason_key = Some("playback.video".into());
+            stub.playable = false;
+        }
+        tracks.push(stub);
+    }
+    let mut emitted_remote = HashSet::new();
+    for holding in &holdings {
+        if seen_content.contains(&holding.content_id) || !emitted_remote.insert(holding.content_id.clone()) {
+            continue;
+        }
+        let group: Vec<&HoldingRow> = holdings
+            .iter()
+            .filter(|row| row.content_id == holding.content_id)
+            .collect();
+        let holders: Vec<String> = group
+            .iter()
+            .filter(|row| online.contains(row.device_id.as_str()))
+            .map(|row| row.device_id.clone())
+            .collect();
+        let unplayable = content_unplayable(db, &holding.content_id)?;
+        let badge = if !unplayable && !holders.is_empty() { "remote" } else { "unavailable" };
+        tracks.push(TrackStub {
+            local_file_id: None,
+            content_id: Some(holding.content_id.clone()),
+            title: group.iter().map(|row| row.title.clone()).find(|title| !title.is_empty()).unwrap_or_default(),
+            artist: holding.artist.clone(),
+            album: holding.album.clone(),
+            track_number: holding.track_number,
+            duration_ms: holding.duration_ms,
+            folder: String::new(),
+            file_name: String::new(),
+            added_at: String::new(),
+            favorite: db.is_favorite(Some(&holding.content_id), None)?,
+            exposed: false,
+            badge: badge.into(),
+            access_status: "missing".into(),
+            metadata_status: "ready".into(),
+            playback_status: "untried".into(),
+            reason_key: if badge == "unavailable" { Some("file.missing".into()) } else { None },
+            video: false,
+            cover_url: None,
+            absolute_path: None,
+            holder_ids: holders,
+            playable: badge == "remote",
+            dimmed: badge == "unavailable",
+        });
+    }
+    tracks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    Ok(json!(tracks))
+}
+
+fn stub_from_local(row: &LocalRow, holders: &[String], badge: &str) -> TrackStub {
+    let reason = if row.video {
+        Some("playback.video".into())
+    } else if row.access_status == "missing" {
+        row.access_reason.clone().or(Some("file.missing".into()))
+    } else if row.playback_status == "failed" {
+        row.playback_reason.clone()
+    } else if row.metadata_status == "failed" {
+        Some("metadata.failed".into())
+    } else {
+        None
+    };
+    TrackStub {
+        local_file_id: Some(row.local_file_id.clone()),
+        content_id: row.content_id.clone(),
+        title: row.title.clone(),
+        artist: row.artist.clone(),
+        album: row.album.clone(),
+        track_number: row.track_number,
+        duration_ms: row.duration_ms,
+        folder: row.folder.clone(),
+        file_name: row.file_name.clone(),
+        added_at: row.added_at.clone(),
+        favorite: row.favorite,
+        exposed: row.exposed,
+        badge: badge.into(),
+        access_status: row.access_status.clone(),
+        metadata_status: row.metadata_status.clone(),
+        playback_status: row.playback_status.clone(),
+        reason_key: reason,
+        video: row.video,
+        cover_url: row.cover_path.clone(),
+        absolute_path: Some(row.absolute_path.clone()),
+        holder_ids: holders.to_vec(),
+        playable: badge == "local" && !row.video && row.access_status == "available",
+        dimmed: badge == "unavailable" || row.access_status != "available",
+    }
+}
+
+fn holders_of(holdings: &[HoldingRow], content_id: &str, online: &HashSet<&str>) -> Vec<String> {
+    holdings
+        .iter()
+        .filter(|row| row.content_id == content_id && online.contains(row.device_id.as_str()))
+        .map(|row| row.device_id.clone())
+        .collect()
+}
+
+fn content_unplayable(db: &Db, content_id: &str) -> AppResult<bool> {
+    db.content_unplayable(content_id)
+}
+
+struct HoldingRow {
+    device_id: String,
+    content_id: String,
+    title: String,
+    artist: String,
+    album: String,
+    track_number: Option<i64>,
+    duration_ms: Option<i64>,
+}
+
+fn load_holdings(db: &Db) -> AppResult<Vec<HoldingRow>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT device_id, content_id, COALESCE(title, ''), COALESCE(artist, ''), COALESCE(album, ''), track_number, duration_ms
+         FROM holdings",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(HoldingRow {
+            device_id: row.get(0)?,
+            content_id: row.get(1)?,
+            title: row.get(2)?,
+            artist: row.get(3)?,
+            album: row.get(4)?,
+            track_number: row.get(5)?,
+            duration_ms: row.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn load_local(db: &Db) -> AppResult<Vec<LocalRow>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT f.local_file_id, f.content_id, f.title, f.artist, f.album, f.track_number, f.duration_ms,
+                f.absolute_path, f.file_name, f.added_at, f.exposed, f.access_status, f.metadata_status,
+                f.playback_status, f.playback_reason, f.access_reason, f.video, f.cover_path,
+                EXISTS(SELECT 1 FROM favorites fav WHERE fav.local_file_id = f.local_file_id OR (f.content_id IS NOT NULL AND fav.content_id = f.content_id)),
+                COALESCE((SELECT c.unplayable FROM content_items c WHERE c.content_id = f.content_id), 0)
+         FROM local_files f",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let absolute: String = row.get(7)?;
+        let folder = std::path::Path::new(&absolute)
+            .parent()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Ok(LocalRow {
+            local_file_id: row.get(0)?,
+            content_id: row.get(1)?,
+            title: row.get(2)?,
+            artist: row.get(3)?,
+            album: row.get(4)?,
+            track_number: row.get(5)?,
+            duration_ms: row.get(6)?,
+            absolute_path: absolute,
+            file_name: row.get(8)?,
+            added_at: row.get(9)?,
+            exposed: row.get::<_, i64>(10)? != 0,
+            access_status: row.get(11)?,
+            metadata_status: row.get(12)?,
+            playback_status: row.get(13)?,
+            playback_reason: row.get(14)?,
+            access_reason: row.get(15)?,
+            video: row.get::<_, i64>(16)? != 0,
+            cover_path: row.get(17)?,
+            favorite: row.get::<_, i64>(18)? != 0,
+            folder,
+            unplayable: row.get::<_, i64>(19)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn local_publishable(db: &Db) -> AppResult<Vec<crate::db::HoldingInput>> {
+    if !db.setting_bool("audioShare")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = db.conn.prepare(
+        "SELECT content_id,
+                CASE WHEN metadata_status = 'failed' THEN '' ELSE title END,
+                CASE WHEN metadata_status = 'failed' THEN '' ELSE artist END,
+                CASE WHEN metadata_status = 'failed' THEN '' ELSE album END,
+                track_number, duration_ms, codec
+         FROM local_files
+         WHERE exposed = 1 AND access_status = 'available' AND content_id IS NOT NULL AND video = 0",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(crate::db::HoldingInput {
+            content_id: row.get(0)?,
+            title: blank_if_filename(row.get(1)?, row.get::<_, String>(0)?),
+            artist: row.get(2)?,
+            album: row.get(3)?,
+            track_number: row.get(4)?,
+            duration_ms: row.get(5)?,
+            codec: row.get(6)?,
+        })
+    })?;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for row in rows {
+        let row = row?;
+        if seen.insert(row.content_id.clone()) {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+fn blank_if_filename(title: String, content_id: String) -> String {
+    if title == content_id { String::new() } else { title }
+}
+
+pub fn readable_paths(db: &Db, content_id: &str) -> AppResult<Vec<(String, String)>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT local_file_id, absolute_path FROM local_files
+         WHERE content_id = ?1 AND exposed = 1 AND access_status = 'available'",
+    )?;
+    let rows = stmt.query_map(params![content_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// FTS covers local title, artist, lyrics and folder. Remote rows and substrings inside CJK words match on title, artist and album.
+pub fn search(db: &Db, query: &str, online: &[String]) -> AppResult<Value> {
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|token| token.to_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return Ok(json!([]));
+    }
+    let hits = db.search_hits(query, 400)?;
+    let show_unavailable = db.setting_bool("showUnavailable").unwrap_or(true);
+    let all = library(db, online)?;
+    let text = |track: &Value, key: &str| track.get(key).and_then(|value| value.as_str()).unwrap_or("").to_lowercase();
+    let mut out = Vec::new();
+    for mut track in all.as_array().cloned().unwrap_or_default() {
+        if !show_unavailable && track.get("badge").and_then(|value| value.as_str()) == Some("unavailable") {
+            continue;
+        }
+        let hit = track
+            .get("localFileId")
+            .and_then(|value| value.as_str())
+            .and_then(|id| hits.get(id))
+            .cloned();
+        let haystack = format!(
+            "{} {} {} {}",
+            text(&track, "title"),
+            text(&track, "artist"),
+            text(&track, "album"),
+            text(&track, "fileName")
+        );
+        let plain = tokens.iter().all(|token| haystack.contains(token.as_str()));
+        if hit.is_none() && !plain {
+            continue;
+        }
+        if let Some(Some(snippet)) = hit.filter(|_| !plain) {
+            track["snippet"] = json!(snippet);
+        }
+        out.push(track);
+    }
+    Ok(json!(out))
+}
+
+#[allow(dead_code)]
+pub fn cover_file(path: &str) -> Option<String> {
+    Some(path.to_string())
+}
