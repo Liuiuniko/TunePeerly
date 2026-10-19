@@ -553,7 +553,7 @@
     "historyCapInvalid": "Enter a number between 1 and 10000.",
     "revise": "To be revised",
     "doNotUse": "Do not use",
-    "notImplemented": "Not implemented yet",
+    "notImplemented": "Not completed yet, not tested",
     "historySync": "Sync recently played",
     "historySyncHelp": "When a song finishes, this computer stamps it in UTC and sends the change. Another device updates its list only when it has this on too. The same timestamp on two songs is ordered either way.",
     "historyStartup": "Merge when this computer comes online",

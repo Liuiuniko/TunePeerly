@@ -305,7 +305,7 @@ export function SettingsPage() {
             ]}
           />
         </Row>
-        <h3><span className="setting-title-line">{t("settings.relay")}<NotImplemented /></span></h3>
+        <h3><span className="setting-title-line">{t("settings.relay")}<NotImplemented /><DoNotUse /></span></h3>
         <p className="setting-help">
           {t("settings.relayHelp")} <span className={`state-pill ${relay.tone}`}>{relay.text}</span>
         </p>
