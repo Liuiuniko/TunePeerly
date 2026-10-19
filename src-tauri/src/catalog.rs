@@ -99,10 +99,10 @@ pub fn library(db: &Db, online: &[String]) -> AppResult<Value> {
             local_file_id: None,
             content_id: Some(holding.content_id.clone()),
             title: group.iter().map(|row| row.title.clone()).find(|title| !title.is_empty()).unwrap_or_default(),
-            artist: holding.artist.clone(),
-            album: holding.album.clone(),
-            track_number: holding.track_number,
-            duration_ms: holding.duration_ms,
+            artist: group.iter().map(|row| row.artist.as_str()).find(|text| !text.is_empty()).unwrap_or("").to_string(),
+            album: group.iter().map(|row| row.album.as_str()).find(|text| !text.is_empty()).unwrap_or("").to_string(),
+            track_number: group.iter().find_map(|row| row.track_number),
+            duration_ms: group.iter().find_map(|row| row.duration_ms),
             folder: String::new(),
             file_name: String::new(),
             added_at: String::new(),
@@ -112,7 +112,7 @@ pub fn library(db: &Db, online: &[String]) -> AppResult<Value> {
             access_status: "missing".into(),
             metadata_status: "ready".into(),
             playback_status: "untried".into(),
-            reason_key: if badge == "unavailable" { Some("file.missing".into()) } else { None },
+            reason_key: if badge == "unavailable" { Some("notice.offlineTrack".into()) } else { None },
             video: false,
             cover_url: remote_covers.get(&holding.content_id).cloned(),
             absolute_path: None,
@@ -286,14 +286,14 @@ pub fn local_publishable(db: &Db) -> AppResult<Vec<crate::db::HoldingInput>> {
                 CASE WHEN metadata_status = 'failed' THEN '' ELSE title END,
                 CASE WHEN metadata_status = 'failed' THEN '' ELSE artist END,
                 CASE WHEN metadata_status = 'failed' THEN '' ELSE album END,
-                track_number, duration_ms, codec
+                track_number, duration_ms, codec, file_name
          FROM local_files
          WHERE exposed = 1 AND access_status = 'available' AND content_id IS NOT NULL AND video = 0",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(crate::db::HoldingInput {
             content_id: row.get(0)?,
-            title: blank_if_filename(row.get(1)?, row.get::<_, String>(0)?),
+            title: blank_if_filename(row.get(1)?, row.get::<_, Option<String>>(7)?.unwrap_or_default()),
             artist: row.get(2)?,
             album: row.get(3)?,
             track_number: row.get(4)?,
@@ -312,8 +312,8 @@ pub fn local_publishable(db: &Db) -> AppResult<Vec<crate::db::HoldingInput>> {
     Ok(out)
 }
 
-fn blank_if_filename(title: String, content_id: String) -> String {
-    if title == content_id { String::new() } else { title }
+fn blank_if_filename(title: String, file_name: String) -> String {
+    if title == file_name { String::new() } else { title }
 }
 
 pub fn readable_paths(db: &Db, content_id: &str) -> AppResult<Vec<(String, String)>> {

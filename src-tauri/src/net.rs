@@ -215,6 +215,14 @@ struct PeerOut {
     tx: mpsc::UnboundedSender<Frame>,
     /// Bounded so file reads wait for the socket instead of queueing a whole file.
     audio: mpsc::Sender<Frame>,
+    /// Turns false when this connection is dropped, so transfers still reading a file stop at once.
+    alive: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for PeerOut {
+    fn drop(&mut self) {
+        self.alive.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 async fn run(
@@ -1055,6 +1063,7 @@ fn adopt_connection(
         path: path.clone(),
         tx: writer,
         audio,
+        alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     });
     if confirmed {
         let shown = name.clone();
@@ -1407,6 +1416,10 @@ fn heard_nearby(id: &str, item: &Heard, nets: &[(Ipv4Addr, Ipv4Addr)]) -> Nearby
             return;
         }
         let shared = nets.iter().any(|(local, mask)| u32::from(*local) & u32::from(*mask) == u32::from(ip) & u32::from(*mask));
+        // A packet is unauthenticated, so an address it only claims is dialed only when it is on our own subnet.
+        if !heard && !shared {
+            return;
+        }
         // Same subnet as one of our own interfaces first, then addresses we actually heard from.
         let rank = match (shared, heard) {
             (true, true) => 0,
@@ -2297,6 +2310,7 @@ fn serve_audio(
         .unwrap_or_default();
     let tx = peer.tx.clone();
     let audio = peer.audio.clone();
+    let alive = peer.alive.clone();
     let live = live.clone();
     if let Ok(mut guard) = live.inner.lock() {
         guard.active_audio.insert(id);
@@ -2341,7 +2355,7 @@ fn serve_audio(
         let mut offset = start;
         let mut buf = vec![0u8; 24 * 1024];
         loop {
-            if live.inner.lock().map(|mut guard| guard.cancelled.remove(&id)).unwrap_or(false) {
+            if !alive.load(std::sync::atomic::Ordering::Relaxed) || live.inner.lock().map(|mut guard| guard.cancelled.remove(&id)).unwrap_or(false) {
                 break;
             }
             if offset >= stop {
@@ -2975,10 +2989,10 @@ fn snapshot_items(db: &Db, feature: &str) -> Value {
         "appearance" => json!({
             "theme": db.synced("theme").unwrap_or_else(|_| "dark".into()),
             "language": db.synced("language").unwrap_or_else(|_| "en".into()),
-            "miniPlayer": db.setting_bool("miniPlayer").unwrap_or(false),
+            "miniPlayer": db.mini_flags().0,
+            "miniTray": db.mini_flags().1,
             "closeAction": db.setting_string("closeAction").unwrap_or_default(),
         }),
-        "playlists" => db.playlist_snapshot().unwrap_or(json!([])),
         "history" => json!(db
             .history_for_sync()
             .unwrap_or_default()
@@ -2993,15 +3007,12 @@ fn sync_appearance_window(app: &AppHandle, db: &Db, feature: &str) {
     if feature != "appearance" {
         return;
     }
-    let mini = db.setting_bool("miniPlayer").unwrap_or(false);
-    crate::desktop::sync_mini(app, mini);
+    let (on_minimize, in_tray) = db.mini_flags();
+    crate::desktop::sync_mini(app, on_minimize, in_tray);
 }
 
 fn apply_snapshot_payload(db: &Db, feature: &str, items: &Value) {
     match feature {
-        "playlists" => {
-            let _ = db.apply_playlist_snapshot(items);
-        }
         "history" => {
             let entries = items
                 .as_array()
@@ -3032,6 +3043,9 @@ fn apply_snapshot_payload(db: &Db, feature: &str, items: &Value) {
             }
             if let Some(mini) = items.get("miniPlayer").and_then(|value| value.as_bool()) {
                 let _ = db.set_device_setting("miniPlayer", json!(mini));
+            }
+            if let Some(tray) = items.get("miniTray").and_then(|value| value.as_bool()) {
+                let _ = db.set_device_setting("miniTray", json!(tray));
             }
             if let Some(action) = items.get("closeAction").and_then(|value| value.as_str()) {
                 let _ = db.set_device_setting("closeAction", json!(action));
@@ -3388,8 +3402,17 @@ async fn start_download(
     let folder = guard.setting_string("downloadFolder").unwrap_or_default();
     if folder.is_empty() {
         drop(guard);
+        // Keep what was already waiting for a folder. Choosing one restarts the shown song and the queue follows it.
         if let Ok(mut queued) = live.inner.lock() {
-            queued.download_queue.clear();
+            queued.download_queue.retain(|item| item.content_id != content_id);
+            let waiting = queued
+                .download
+                .as_ref()
+                .filter(|item| item.state == "need-folder" && item.content_id != content_id)
+                .map(|item| QueuedDownload { content_id: item.content_id.clone(), title: item.title.clone() });
+            if let Some(waiting) = waiting {
+                queued.download_queue.push_back(waiting);
+            }
         }
         return set_status(&content_id, "need-folder", "", "");
     }
@@ -3468,8 +3491,11 @@ async fn start_download(
                 }
                 if !piece.data.is_empty() {
                     let at = piece.offset as usize;
-                    if bytes.len() < at {
-                        bytes.resize(at, 0);
+                    // The sender streams from the start. A gap, or more bytes than the announced size, is a bad peer.
+                    let over = total_bytes > 0 && (at as u64).saturating_add(piece.data.len() as u64) > total_bytes;
+                    if at > bytes.len() || over {
+                        failed = true;
+                        break;
                     }
                     bytes.truncate(at);
                     bytes.extend_from_slice(&piece.data);
@@ -3554,10 +3580,7 @@ async fn start_download(
 fn download_name(title: &str, codec: &str, content_id: &str) -> String {
     let clean = title.chars().map(|ch| if "\\/:*?\"<>|".contains(ch) { '_' } else { ch }).collect::<String>();
     let stem = if clean.trim().is_empty() { content_id } else { clean.trim() };
-    let ext = match codec {
-        "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "aiff" => codec,
-        _ => "audio",
-    };
+    let ext = crate::scan::file_extension_for_codec(codec);
     format!("{stem}.{ext}")
 }
 

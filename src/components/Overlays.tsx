@@ -213,7 +213,7 @@ function OfferDialog() {
     });
   };
   return (
-    <Modal onClose={() => answer("reject")} label={t("offer.title")}>
+    <Modal onClose={() => !incoming && answer("reject")} label={t("offer.title")}>
       <div className="offer">
         <div className="offer-icon">
           <Icons.link />
@@ -283,7 +283,7 @@ function MoveDialog() {
 function DownloadWatcher() {
   const { t } = useTranslation();
   const app = useApp();
-  const download = app.boot?.download ?? null;
+  const download = app.downloadFeed?.current ?? app.boot?.download ?? null;
   const seen = useRef("");
   useEffect(() => {
     if (!download) return;

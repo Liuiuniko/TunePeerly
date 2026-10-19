@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useTranslation } from "react-i18next";
 import { api, errorText, pickFiles, pickFolder, type Bootstrap, type ContentMove, type DownloadFeed, type MemberRef, type OverwriteAsk, type Settings, type Track } from "../api";
 import i18n from "../i18n";
-import { filterText, refOf, reorderVisible, shufflable, trackKey, TrackIndex } from "../lib/library";
+import { albumParts, filterText, refOf, reorderVisible, shufflable, trackKey, TrackIndex } from "../lib/library";
 import {
   addToQueue,
   continueLibrary,
@@ -75,7 +75,7 @@ export function mirrorPosition(mirror: PlaybackMirror, now = performance.now()):
   return mirror.duration > 0 ? Math.min(raw, mirror.duration) : raw;
 }
 
-function followedTrack(mirror: PlaybackMirror, tracks: Track[]): Track {
+function followedTrack(mirror: PlaybackMirror, tracks: Track[], favoriteIds: ReadonlySet<string>): Track {
   const found = tracks.find((track) => track.contentId && track.contentId === mirror.contentId);
   if (found) return found;
   return {
@@ -89,7 +89,7 @@ function followedTrack(mirror: PlaybackMirror, tracks: Track[]): Track {
     folder: "",
     fileName: "",
     addedAt: "",
-    favorite: false,
+    favorite: favoriteIds.has(mirror.contentId),
     exposed: false,
     badge: "remote",
     accessStatus: "",
@@ -310,8 +310,11 @@ function useModel() {
         const level = Number.isFinite(saved) ? Math.min(1, Math.max(0, saved)) : 1;
         setVolumeState(level);
         engine.setVolume(level, false);
-        context.current = { id: state.contextId, tracks: null };
-        engine.cue(new TrackIndex(next.tracks).get(state.current) ?? null, state.positionSec);
+        const index = new TrackIndex(next.tracks);
+        const keys = (state.contextId === "search" || state.contextId === "problems") && Array.isArray(next.player.contextKeys) ? next.player.contextKeys : null;
+        const rebuilt = keys ? keys.map((key) => index.get({ key: String(key) })).filter((track): track is Track => !!track) : null;
+        context.current = { id: state.contextId, tracks: rebuilt && rebuilt.length > 0 ? rebuilt : null };
+        engine.cue(index.get(state.current) ?? null, state.positionSec);
       }
     } catch (error) {
       if (request === refreshRequest.current) setLoadError(errorText(error));
@@ -385,7 +388,12 @@ function useModel() {
     const trimmed = state.past.length > PAST_LIMIT ? { ...state, past: state.past.slice(-PAST_LIMIT) } : state;
     queueRef.current = trimmed;
     setQueueState(trimmed);
-    void api.savePlayer({ ...trimmed, positionSec: position }).catch(() => {});
+    // A search or problem list cannot be rebuilt from its id, so keep its track keys for the next launch.
+    const saved: Record<string, unknown> = { ...trimmed, positionSec: position };
+    if ((trimmed.contextId === "search" || trimmed.contextId === "problems") && context.current.id === trimmed.contextId && context.current.tracks) {
+      saved.contextKeys = context.current.tracks.slice(0, 2000).map(trackKey);
+    }
+    void api.savePlayer(saved as unknown as QueueState).catch(() => {});
   }, [engine]);
 
   const contextTracks = useCallback((id: string): Track[] => {
@@ -400,8 +408,12 @@ function useModel() {
         return indexRef.current.members(membersRef.current[value] ?? []);
       case "artist":
         return visible.filter((track) => track.artist === value);
-      case "album":
-        return visible.filter((track) => track.album === value).sort((a, b) => (a.trackNumber ?? 0) - (b.trackNumber ?? 0));
+      case "album": {
+        const { artist, album } = albumParts(value);
+        return visible
+          .filter((track) => track.album === album && track.artist === artist)
+          .sort((a, b) => (a.trackNumber ?? Number.MAX_SAFE_INTEGER) - (b.trackNumber ?? Number.MAX_SAFE_INTEGER) || a.title.localeCompare(b.title));
+      }
       case "folder":
         return visible.filter((track) => track.folder === value);
       case "device":
@@ -421,6 +433,9 @@ function useModel() {
       }
       case "added":
         return visible.slice().sort((a, b) => b.addedAt.localeCompare(a.addedAt) || a.title.localeCompare(b.title));
+      case "search":
+      case "problems":
+        return [];
       default:
         return visible;
     }
@@ -685,8 +700,20 @@ function useModel() {
 
   const like = useCallback(async (track: Track) => {
     const key = trackKey(track);
+    const remember = (value: boolean) => (ids: string[] | undefined) => {
+      const next = new Set(ids ?? []);
+      if (track.contentId) {
+        if (value) next.add(track.contentId);
+        else next.delete(track.contentId);
+      }
+      return [...next];
+    };
     const flip = (value: boolean) =>
-      patchBoot((item) => ({ ...item, tracks: item.tracks.map((row) => (trackKey(row) === key ? { ...row, favorite: value } : row)) }));
+      patchBoot((item) => ({
+        ...item,
+        favoriteIds: remember(value)(item.favoriteIds),
+        tracks: item.tracks.map((row) => (trackKey(row) === key ? { ...row, favorite: value } : row)),
+      }));
     flip(!track.favorite);
     try {
       const added = await api.toggleFavorite(track.contentId, track.localFileId);
@@ -870,12 +897,6 @@ function useModel() {
     ended: () => {
       const state = queueRef.current;
       const track = indexRef.current.get(state.current);
-      const pausedHistory = Boolean(bootRef.current?.settings.historyPaused);
-      if (track && !bootRef.current?.settings.incognito && !pausedHistory) {
-        const key = trackKey(track);
-        patchBoot((item) => ({ ...item, history: [key, ...item.history.filter((value) => value !== key)] }));
-        void api.recordHistory(track.contentId, track.localFileId).catch(() => {});
-      }
       if (state.repeat === "one" && track) {
         // Persist the restart immediately.  Calling the engine alone leaves
         // the saved queue at the old end position when the app is closed
@@ -909,7 +930,13 @@ function useModel() {
         void api.playbackResult(track.localFileId, track.contentId, "failed", info.reason).then(scheduleRefresh).catch(() => {});
       }
     },
-    heard: () => {},
+    // Counted once the song was really heard, not only when it plays to the end.
+    heard: (track) => {
+      if (bootRef.current?.settings.incognito || bootRef.current?.settings.historyPaused) return;
+      const key = trackKey(track);
+      patchBoot((item) => ({ ...item, history: [key, ...item.history.filter((value) => value !== key)] }));
+      void api.recordHistory(track.contentId, track.localFileId).catch(() => {});
+    },
     paused: (track, position) => {
       void api.saveProgress(position).catch(() => {});
       publishPlayback(false, track, position);
@@ -943,9 +970,10 @@ function useModel() {
 
   const followId = String(settings.positionSyncDevice ?? "");
   const following = Boolean(followId && mirror?.deviceId === followId && !settings.incognito);
+  const favoriteIds = useMemo(() => new Set(boot?.favoriteIds ?? []), [boot?.favoriteIds]);
   const shown = useMemo(
-    () => (following && mirror ? followedTrack(mirror, tracks) : current ?? null),
-    [following, mirror, tracks, current],
+    () => (following && mirror ? followedTrack(mirror, tracks, favoriteIds) : current ?? null),
+    [following, mirror, tracks, current, favoriteIds],
   );
 
   useEffect(() => {

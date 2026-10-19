@@ -19,7 +19,7 @@ use crate::error::{AppError, AppResult};
 
 const AUDIO_EXT: &[&str] = &[
     "flac", "wav", "wave", "mp3", "ogg", "opus", "m4a", "aac", "aiff", "aif", "wma", "alac",
-    "ape", "wv", "dsf", "dff", "m4b", "mp4", "caf", "tta", "spx", "oga",
+    "ape", "wv", "dsf", "dff", "m4b", "mp4", "caf", "tta", "spx", "oga", "audio",
 ];
 const VIDEO_EXT: &[&str] = &["mkv", "avi", "webm", "wmv", "flv", "mpg", "mpeg", "mov", "m4v"];
 const TAG_WORKERS: usize = 4;
@@ -353,7 +353,7 @@ fn collect_audio(dir: &Path, out: &mut Vec<PathBuf>) {
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if file_type.is_dir() && !file_type.is_symlink() {
+            if file_type.is_dir() && !file_type.is_symlink() && !is_reparse_point(&entry) {
                 pending.push(entry.path());
             } else if file_type.is_file() {
                 let path = entry.path();
@@ -363,6 +363,22 @@ fn collect_audio(dir: &Path, out: &mut Vec<PathBuf>) {
             }
         }
     }
+}
+
+/// A Windows directory junction is not reported as a symlink, but it is a reparse point.
+#[cfg(windows)]
+fn is_reparse_point(entry: &fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    entry
+        .metadata()
+        .map(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_entry: &fs::DirEntry) -> bool {
+    false
 }
 
 fn is_download_temp(path: &Path) -> bool {
@@ -382,6 +398,24 @@ fn extension(path: &Path) -> String {
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_ascii_lowercase()
+}
+
+/// Turns a stored codec or probe name into an extension this library will scan.
+/// A value that is already a scanned extension is kept as it is, so `.mp4` stays `.mp4`.
+pub fn file_extension_for_codec(codec: &str) -> String {
+    let codec = codec.trim().to_ascii_lowercase();
+    if AUDIO_EXT.contains(&codec.as_str()) {
+        return codec;
+    }
+    // Names that older versions stored from the probe instead of from the file name.
+    let mapped = match codec.as_str() {
+        "mpeg" | "mp2" => "mp3",
+        "vorbis" => "ogg",
+        "wavpack" => "wv",
+        "speex" => "spx",
+        _ => "audio",
+    };
+    mapped.to_string()
 }
 
 fn index_fts(
@@ -469,7 +503,14 @@ fn read_tags(path: &Path) -> TagRead {
     read.duration_ms = if duration > 0 { duration.try_into().ok() } else { None };
     read.sample_rate = properties.sample_rate().map(|value| value as i64);
     read.bit_depth = properties.bit_depth().map(|value| value as i64);
-    read.codec = format!("{:?}", tagged.file_type()).to_ascii_lowercase();
+    // Keep a real filename extension. The probe's type name (mpeg, mp4, vorbis)
+    // is not an extension the library scan will accept later.
+    let original = extension(path);
+    read.codec = if AUDIO_EXT.contains(&original.as_str()) || VIDEO_EXT.contains(&original.as_str()) {
+        original
+    } else {
+        file_extension_for_codec(&format!("{:?}", tagged.file_type()).to_ascii_lowercase())
+    };
     if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
         read.title = tag.title().unwrap_or_default().trim().to_string();
         read.artist = tag.artist().unwrap_or_default().trim().to_string();
@@ -502,20 +543,74 @@ fn container_has_video(path: &Path) -> bool {
     let Ok(mut file) = File::open(path) else {
         return false;
     };
-    let mut buf = vec![0u8; 512 * 1024];
-    let Ok(n) = file.read(&mut buf) else {
-        return false;
-    };
-    let sample = &buf[..n];
-    contains_handler(sample, b"vide") && !audio_only_handler(sample)
+    mp4_has_video_track(&mut file).unwrap_or(false)
 }
 
-fn contains_handler(sample: &[u8], kind: &[u8]) -> bool {
-    sample.windows(kind.len()).any(|window| window == kind)
+/// Walks the top-level boxes to `moov` and looks at each track's handler type.
+/// Text inside tags or audio data can never be mistaken for a video track this way.
+fn mp4_has_video_track(file: &mut File) -> Option<bool> {
+    use std::io::{Seek as _, SeekFrom};
+    const MOOV_LIMIT: u64 = 16 * 1024 * 1024;
+    let total = file.metadata().ok()?.len();
+    let mut pos = 0u64;
+    for _ in 0..4096 {
+        if pos + 8 > total {
+            return None;
+        }
+        file.seek(SeekFrom::Start(pos)).ok()?;
+        let mut head = [0u8; 16];
+        file.read_exact(&mut head[..8]).ok()?;
+        let mut size = u32::from_be_bytes(head[..4].try_into().ok()?) as u64;
+        let mut header = 8u64;
+        if size == 1 {
+            file.read_exact(&mut head[8..16]).ok()?;
+            size = u64::from_be_bytes(head[8..16].try_into().ok()?);
+            header = 16;
+        } else if size == 0 {
+            size = total - pos;
+        }
+        if size < header {
+            return None;
+        }
+        if &head[4..8] == b"moov" {
+            let len = size - header;
+            if len > MOOV_LIMIT || pos + size > total {
+                return None;
+            }
+            let mut buf = vec![0u8; len as usize];
+            file.read_exact(&mut buf).ok()?;
+            return Some(moov_has_video(&buf));
+        }
+        pos += size;
+    }
+    None
 }
 
-fn audio_only_handler(sample: &[u8]) -> bool {
-    contains_handler(sample, b"soun") && !contains_handler(sample, b"vide")
+fn mp4_boxes(buf: &[u8]) -> Vec<([u8; 4], &[u8])> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + 8 <= buf.len() {
+        let size = u32::from_be_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]) as usize;
+        let kind = [buf[at + 4], buf[at + 5], buf[at + 6], buf[at + 7]];
+        if size < 8 || at + size > buf.len() {
+            break;
+        }
+        out.push((kind, &buf[at + 8..at + size]));
+        at += size;
+    }
+    out
+}
+
+fn moov_has_video(moov: &[u8]) -> bool {
+    mp4_boxes(moov)
+        .into_iter()
+        .filter(|(kind, _)| kind == b"trak")
+        .flat_map(|(_, trak)| mp4_boxes(trak))
+        .filter(|(kind, _)| kind == b"mdia")
+        .flat_map(|(_, mdia)| mp4_boxes(mdia))
+        .filter(|(kind, _)| kind == b"hdlr")
+        // version and flags, a reserved word, then the four-letter handler type
+        .any(|(_, hdlr)| hdlr.len() >= 12 && &hdlr[8..12] == b"vide")
 }
 
 pub struct HashJob {

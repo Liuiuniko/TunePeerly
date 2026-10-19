@@ -9,12 +9,11 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::sync_logic::{self, HistoryEntry, MemberRef};
+use crate::sync_logic::{merge_history, HistoryEntry, MemberRef};
 
-pub const FEATURES: [&str; 4] = [
+pub const FEATURES: [&str; 3] = [
     "favorites",
     "appearance",
-    "playlists",
     "history",
 ];
 
@@ -180,6 +179,14 @@ impl Db {
         Ok(())
     }
 
+    /// Whether the corner bar shows when the window is minimized, and when it is hidden in the tray.
+    pub fn mini_flags(&self) -> (bool, bool) {
+        (
+            self.setting_bool("miniPlayer").unwrap_or(false),
+            self.setting_bool("miniTray").unwrap_or(true),
+        )
+    }
+
     pub fn setting_raw(&self, key: &str) -> AppResult<String> {
         self.conn
             .query_row(
@@ -334,12 +341,21 @@ impl Db {
     }
 
     fn delete_local_file_record(&self, local_file_id: &str) -> AppResult<()> {
+        // A hashed row is identified by its content, so it outlives the file. Only unhashed rows go with the file.
         self.conn.execute(
-            "DELETE FROM favorites WHERE local_file_id = ?1",
+            "DELETE FROM favorites WHERE local_file_id = ?1 AND content_id IS NULL",
             params![local_file_id],
         )?;
         self.conn.execute(
-            "DELETE FROM playlist_tracks WHERE local_file_id = ?1",
+            "UPDATE favorites SET local_file_id = NULL WHERE local_file_id = ?1",
+            params![local_file_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM playlist_tracks WHERE local_file_id = ?1 AND content_id IS NULL",
+            params![local_file_id],
+        )?;
+        self.conn.execute(
+            "UPDATE playlist_tracks SET local_file_id = NULL WHERE local_file_id = ?1",
             params![local_file_id],
         )?;
         self.conn.execute(
@@ -812,13 +828,27 @@ impl Db {
         if revision <= applied {
             return Ok(false);
         }
+        // One transaction, so a failure never leaves this device's catalog empty without a new revision.
+        self.conn.execute_batch("BEGIN")?;
+        let written = self.write_peer_holdings(device_id, revision, rows);
+        match written {
+            Ok(()) => self.conn.execute_batch("COMMIT")?,
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(err);
+            }
+        }
+        Ok(true)
+    }
+
+    fn write_peer_holdings(&self, device_id: &str, revision: i64, rows: &[HoldingInput]) -> AppResult<()> {
         self.conn.execute(
             "DELETE FROM holdings WHERE device_id = ?1",
             params![device_id],
         )?;
         for row in rows {
             self.conn.execute(
-                "INSERT INTO holdings(device_id, revision, content_id, title, artist, album, track_number, duration_ms, codec)
+                "INSERT OR REPLACE INTO holdings(device_id, revision, content_id, title, artist, album, track_number, duration_ms, codec)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     device_id,
@@ -838,7 +868,7 @@ impl Db {
              ON CONFLICT(device_id) DO UPDATE SET revision = excluded.revision",
             params![device_id, revision],
         )?;
-        Ok(true)
+        Ok(())
     }
 
     pub fn delete_peer_holdings(&self, device_id: &str) -> AppResult<()> {
@@ -992,104 +1022,6 @@ impl Db {
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    pub fn playlist_snapshot(&self) -> AppResult<Value> {
-        let lists = self.playlists()?;
-        let mut out = Vec::new();
-        for list in lists {
-            let members = self
-                .content_member_refs("playlist", Some(&list.id))?
-                .into_iter()
-                .filter_map(|member| self.resolved_content_id(member.content_id, member.local_file_id))
-                .collect::<Vec<_>>();
-            out.push(json!({"id": list.id, "name": list.name, "members": members}));
-        }
-        Ok(json!(out))
-    }
-
-    /// Replaces playlists with the snapshot. Unhashed local rows and this computer's exposure defaults stay.
-    pub fn apply_playlist_snapshot(&self, items: &Value) -> AppResult<()> {
-        let Some(lists) = items.as_array() else { return Ok(()) };
-        let incoming: Vec<(String, String, Vec<String>)> = lists
-            .iter()
-            .filter_map(|item| {
-                let id = item.get("id")?.as_str()?.to_string();
-                let name = item.get("name")?.as_str()?.to_string();
-                let members = item
-                    .get("members")?
-                    .as_array()?
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_string))
-                    .collect();
-                Some((id, name, members))
-            })
-            .collect();
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = self.write_playlist_snapshot(&incoming);
-        if result.is_ok() {
-            if let Err(error) = self.conn.execute_batch("COMMIT") {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                return Err(error.into());
-            }
-        } else {
-            let _ = self.conn.execute_batch("ROLLBACK");
-        }
-        result
-    }
-
-    fn write_playlist_snapshot(&self, incoming: &[(String, String, Vec<String>)]) -> AppResult<()> {
-        let keep: Vec<&str> = incoming.iter().map(|(id, _, _)| id.as_str()).collect();
-        for existing in self.playlists()? {
-            if !keep.contains(&existing.id.as_str()) {
-                self.delete_playlist(&existing.id)?;
-            }
-        }
-        for (position, (id, name, members)) in incoming.iter().enumerate() {
-            self.conn.execute(
-                "INSERT INTO playlists(id, name, position, exposure, revision) VALUES(?1, ?2, ?3, 'follow', 0)
-                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, position = excluded.position",
-                params![id, name, position as i64 + 1],
-            )?;
-            let existing = self.content_member_refs("playlist", Some(id))?;
-            let before: Vec<String> = existing.iter().filter_map(|member| member.content_id.clone()).collect();
-            let kept = sync_logic::apply_member_snapshot(&existing, members);
-            self.conn
-                .execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", params![id])?;
-            for (index, member) in kept.iter().enumerate() {
-                self.conn.execute(
-                    "INSERT INTO playlist_tracks(playlist_id, position, content_id, local_file_id) VALUES(?1, ?2, ?3, ?4)",
-                    params![id, index as i64 + 1, member.content_id, member.local_file_id],
-                )?;
-            }
-            let exposure: String = self.conn.query_row(
-                "SELECT exposure FROM playlists WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )?;
-            let exposed = self.resolve_exposure(&exposure)?;
-            for content_id in members.iter().filter(|content_id| !before.contains(content_id)) {
-                self.conn.execute(
-                    "UPDATE local_files SET exposed = ?1 WHERE content_id = ?2",
-                    params![exposed, content_id],
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn resolved_content_id(&self, content_id: Option<String>, local_file_id: Option<String>) -> Option<String> {
-        if let Some(id) = content_id.filter(|id| !id.is_empty()) {
-            return Some(id);
-        }
-        let local_file_id = local_file_id?;
-        self.conn
-            .query_row(
-                "SELECT content_id FROM local_files WHERE local_file_id = ?1 AND content_id IS NOT NULL",
-                params![local_file_id],
-                |row| row.get(0),
-            )
-            .ok()
     }
 
     pub fn content_member_refs(&self, table: &str, owner: Option<&str>) -> AppResult<Vec<MemberRef>> {
@@ -1515,6 +1447,7 @@ fn device_defaults() -> Vec<(&'static str, Value)> {
         ("pendingSnapshots", json!({})),
         ("manualAddresses", json!([])),
         ("closeAction", json!("")),
+        ("miniTray", json!(true)),
         ("silenceSeconds", json!(60)),
         ("conflictPolicy", json!("ask")),
         ("overwriteMode", json!("silent")),
@@ -1524,6 +1457,7 @@ fn device_defaults() -> Vec<(&'static str, Value)> {
         ("noticeRead", json!("visible")),
         ("noticeClear", json!("ask")),
         ("silenced", json!({})),
+        ("syncBlocks", json!({})),
     ]
 }
 
@@ -1697,7 +1631,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(
 pub fn merge_history_into_db(db: &Db, remote: Vec<HistoryEntry>) -> AppResult<Vec<HistoryEntry>> {
     let local = db.history_for_sync()?;
     let cap = db.setting_i64("historyCap")?.max(1) as usize;
-    let merged = sync_logic::merge_history(local, remote, Utc::now(), cap);
+    let merged = merge_history(local, remote, Utc::now(), cap);
     db.replace_synced_history(&merged)?;
     Ok(merged)
 }

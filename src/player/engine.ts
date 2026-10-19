@@ -283,8 +283,10 @@ export class PlaybackEngine {
   private releaseReplayGuard(): void {
     if (!this.replayGuard) return;
     const duration = this.audio.duration;
-    const moved = this.audio.currentTime > 0.3 || (Number.isFinite(duration) && duration > 0.0 && this.audio.currentTime > duration * 0.5);
-    if (moved) this.replayGuard = false;
+    const time = this.audio.currentTime;
+    // A stale position near the end must not count as having left the end.
+    const nearEnd = Number.isFinite(duration) && duration > 1 && time >= duration - 0.5;
+    if (time > 0.3 && !nearEnd) this.replayGuard = false;
   }
 
   private markEnded(generation: number, track: Track): void {
@@ -370,14 +372,16 @@ export class PlaybackEngine {
         return;
       }
       if (status === 404) return this.fail(track, { reason: "file.missing", kind: "missing" });
-      // A decoder rejection is about these bytes. Status 0 only means the probe could not see the file URL.
-      if (formatError) return this.fail(track, formatFailure(code));
+      // Status 0 means the probe could not see the file URL at all, so nothing is known about these bytes yet.
+      // Try another device first. If it delivers the bytes and they fail to decode, the remote branch below stops there.
       if (status === 0 && track.contentId && track.holderIds.length > 0) {
         this.skipLocal = true;
         this.generation += 1;
         await this.attach(this.generation, position, wasPlaying);
         return;
       }
+      // A decoder rejection with the file readable is about these bytes.
+      if (formatError) return this.fail(track, formatFailure(code));
       if (missing || status === 0 || code === MediaError.MEDIA_ERR_NETWORK) return this.fail(track, { reason: "file.unreadable", kind: "missing" });
       return this.fail(track, { reason: "playback.unsupported", kind: "unsupported" });
     }

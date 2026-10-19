@@ -11,7 +11,7 @@ First release under the name TunePeerly (声渡).
 - Play local audio from the original file, stream an exposed song from a paired device, and download that original file.
 - Pair on the local network, by address, or by pasting a code. Both computers must accept. Sync traffic is end-to-end encrypted.
 - Reconnect paired devices through a relay you configure.
-- Sync liked songs, playlists, and appearance as a full copy, with auto send, follow, Send, and Override.
+- Sync liked songs and appearance as a full copy, with auto send, follow, Send, and Override.
 - Merge recently played by the latest UTC time, including an optional merge when this computer comes online.
 - Follow playback from one online device. The bar at the bottom tracks that device and this computer stays silent.
 - Incognito, per-item sync blocks, device block, and a choice when a sync conflicts or when another device sends a copy.
@@ -35,7 +35,7 @@ First release under the name TunePeerly (声渡).
 - 从原始文件播放本机音频，从已配对设备串流已公开的歌曲，并下载原始文件。
 - 通过局域网、地址或粘贴配对码配对。两台电脑都要接受。同步数据端到端加密。
 - 通过你自己配置的中继重新连接已配对设备。
-- 喜欢的歌曲、歌单和外观按整份副本同步，包含自动发送、跟随、发送和覆盖。
+- 喜欢的歌曲和外观按整份副本同步，包含自动发送、跟随、发送和覆盖。
 - 最近播放按最新的 UTC 时间合并，也可以在这台电脑上线时合并。
 - 跟随一台在线设备的播放。底部播放条跟着那台设备，这台电脑不发声。
 - 无痕模式、按项目阻止同步、拉黑设备，以及同步冲突或对方发送副本时的处理选择。

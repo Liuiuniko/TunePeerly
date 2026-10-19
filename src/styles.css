@@ -4813,6 +4813,40 @@ button.device-name:hover {
   color: var(--accent);
 }
 
+.mini-player {
+  position: relative;
+}
+
+.mini-close {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.mini-close svg {
+  width: 12px;
+  height: 12px;
+}
+
+.mini-player:hover .mini-close,
+.mini-close:focus-visible {
+  opacity: 1;
+}
+
+.mini-close:hover {
+  background: var(--hover-strong);
+  color: var(--text);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

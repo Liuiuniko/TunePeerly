@@ -50,7 +50,10 @@ pub enum Pull {
 struct Route {
     content_id: String,
     device_id: String,
+    created: std::time::Instant,
 }
+
+const ROUTE_LIMIT: usize = 32;
 
 pub struct AudioBus {
     waiters: Mutex<HashMap<u64, mpsc::UnboundedSender<AudioPiece>>>,
@@ -71,13 +74,21 @@ impl AudioBus {
         let mut bytes = [0u8; 16];
         rand::rng().fill_bytes(&mut bytes);
         let token = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-        self.routes.lock().expect("routes").insert(
+        let mut routes = self.routes.lock().expect("routes");
+        // Playback fetches one token many times (ranges), so tokens cannot be spent. Keep only the newest few.
+        while routes.len() >= ROUTE_LIMIT {
+            let Some(oldest) = routes.iter().min_by_key(|(_, route)| route.created).map(|(key, _)| key.clone()) else { break };
+            routes.remove(&oldest);
+        }
+        routes.insert(
             token.clone(),
             Route {
                 content_id: content_id.to_string(),
                 device_id: device_id.to_string(),
+                created: std::time::Instant::now(),
             },
         );
+        drop(routes);
         format!("{}/{token}", self.base.lock().expect("base"))
     }
 

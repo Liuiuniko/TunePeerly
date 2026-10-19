@@ -4,7 +4,7 @@ import type { Track } from "../api";
 import { beginDrag, clickWasDrag } from "../app/drag";
 import { useApp } from "../app/model";
 import { clockText } from "../lib/format";
-import { displayTitle } from "../lib/library";
+import { albumParts, displayTitle } from "../lib/library";
 import { transport } from "../player/clock";
 import { Icons } from "../ui/icons";
 import { Cover } from "./Cover";
@@ -135,7 +135,7 @@ function useContextLabel(contextId: string): string {
       return app.boot?.playlists.find((item) => item.id === value)?.name ?? t("kind.playlist");
     case "artist":
     case "album":
-      return value || t(`kind.${kind}`);
+      return albumParts(value).album || t("kind.album");
     case "folder":
       return value.split(/[\\/]/).filter(Boolean).pop() ?? value;
     case "device":

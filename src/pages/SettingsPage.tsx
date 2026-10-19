@@ -24,7 +24,7 @@ function openLink(url: string) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-const FEATURES: Feature[] = ["favorites", "playlists", "appearance"];
+const FEATURES: Feature[] = ["favorites", "appearance"];
 const BLOCKS = ["manual", "source", "all"] as const;
 type BlockKey = (typeof BLOCKS)[number];
 
@@ -85,6 +85,9 @@ export function SettingsPage() {
         </Row>
         <Row title={t("settings.miniPlayer")} help={t("settings.miniPlayerHelp")}>
           <Switch label={t("settings.miniPlayer")} checked={Boolean(settings.miniPlayer)} onChange={(value) => set("miniPlayer", value)} />
+        </Row>
+        <Row title={t("settings.miniTray")} help={t("settings.miniTrayHelp")}>
+          <Switch label={t("settings.miniTray")} checked={settings.miniTray !== false} onChange={(value) => set("miniTray", value)} />
         </Row>
         <Row title={t("settings.closeWindow")} help={t("settings.closeWindowHelp")}>
           <Segmented
@@ -475,7 +478,13 @@ function AboutPanel({ nodeRef }: { nodeRef: (node: HTMLElement | null) => void }
 function GrantRow({ grant }: { grant: Grant }) {
   const { t } = useTranslation();
   const app = useApp();
-  const count = app.tracks.filter((track) => track.absolutePath && (grant.kind === "file" ? track.absolutePath === grant.path : track.absolutePath.startsWith(grant.path))).length;
+  const same = (a: string, b: string) => a.replace(/[\\/]+$/, "").toLowerCase() === b.replace(/[\\/]+$/, "").toLowerCase();
+  const inside = (path: string, folder: string) => {
+    const base = folder.replace(/[\\/]+$/, "").toLowerCase();
+    const lower = path.toLowerCase();
+    return lower.startsWith(base) && (lower[base.length] === "\\" || lower[base.length] === "/");
+  };
+  const count = app.tracks.filter((track) => track.absolutePath && (grant.kind === "file" ? same(track.absolutePath, grant.path) : inside(track.absolutePath, grant.path))).length;
   const refresh = () => app.scheduleRefresh();
   return (
     <div className="grant-row">
@@ -619,7 +628,7 @@ function SyncTable() {
               </span>
             ))}
             <span>
-              <SyncButton feature={feature} playlists={feature === "playlists"} compact />
+              <SyncButton feature={feature} compact />
             </span>
           </div>
         );

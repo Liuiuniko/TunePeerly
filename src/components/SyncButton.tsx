@@ -5,7 +5,7 @@ import { useApp } from "../app/model";
 import { Icons } from "../ui/icons";
 
 /** Two actions: send this computer's copy out, or replace it with one connected device's copy. */
-export function SyncButton({ feature, playlists, compact, quiet }: { feature: Feature; playlists?: boolean; compact?: boolean; quiet?: boolean }) {
+export function SyncButton({ feature, compact, quiet }: { feature: Feature; compact?: boolean; quiet?: boolean }) {
   const { t } = useTranslation();
   const app = useApp();
   const boot = app.boot;
@@ -20,8 +20,8 @@ export function SyncButton({ feature, playlists, compact, quiet }: { feature: Fe
   const unavailable = !boot || incognito || online.length === 0;
   const preferred = String(settings.syncRequestDevice ?? "");
   const reason = incognito ? t("sync.pushIncognito") : online.length === 0 ? t("sync.noneOnline") : "";
-  const pushTitle = blocked ? t("sync.pushBlocked") : reason || (playlists ? t("sync.pushPlaylists") : t("sync.pushTitle", { feature: t(`feature.${feature}`) }));
-  const pullTitle = reason || (playlists ? t("sync.pullPlaylists") : t("sync.pullTitle", { feature: t(`feature.${feature}`) }));
+  const pushTitle = blocked ? t("sync.pushBlocked") : reason || t("sync.pushTitle", { feature: t(`feature.${feature}`) });
+  const pullTitle = reason || t("sync.pullTitle", { feature: t(`feature.${feature}`) });
   const buttonClass = compact ? "btn soft small" : quiet ? "link-btn" : "btn ghost";
 
   useEffect(() => {

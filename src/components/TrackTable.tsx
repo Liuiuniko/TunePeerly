@@ -16,7 +16,7 @@ import { beginDrag, clickWasDrag, type DragSource } from "../app/drag";
 import { useApp } from "../app/model";
 import { useScrollRoot } from "../app/scroll";
 import { clockText, dateText, snippetParts } from "../lib/format";
-import { displayTitle, folderName, trackKey, type Sort, type SortKey } from "../lib/library";
+import { albumId, displayTitle, folderName, trackKey, type Sort, type SortKey } from "../lib/library";
 import { clock, transport } from "../player/clock";
 import { Icons } from "../ui/icons";
 import { Cover } from "./Cover";
@@ -291,7 +291,7 @@ const TrackRow = memo(function TrackRow({ track, index, top, number, gridClass, 
           {track.album ? (
             <button type="button" className="link" onClick={(event) => {
               event.stopPropagation();
-              app.navigate({ name: "album", id: track.album });
+                app.navigate({ name: "album", id: albumId(track.artist, track.album) });
             }}>
               {track.album}
             </button>

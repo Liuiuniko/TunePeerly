@@ -83,6 +83,7 @@ fn bootstrap(state: State<'_, AppState>) -> AppResult<Value> {
         "history": db.history_keys()?,
         "pending": pending,
         "tracks": catalog::library(&db, &online)?,
+        "favoriteIds": db.favorite_content_ids()?,
         "listenPort": live.listen_port,
         "portFallback": live.port_fallback,
         "localAddresses": local_addresses,
@@ -286,20 +287,12 @@ fn toggle_favorite(state: State<'_, AppState>, content_id: Option<String>, local
     Ok(added)
 }
 
-fn playlists_changed(state: &AppState) {
-    if let Ok(db) = state.db.lock() {
-        let _ = db.mark_dirty("playlists", true);
-    }
-    let _ = state.net.tx.send(net::Cmd::AutoSync("playlists".into()));
-}
-
 #[tauri::command(async)]
 fn create_playlist(state: State<'_, AppState>, name: String) -> AppResult<String> {
     if name.trim().is_empty() {
         return Err(AppError::Message("playlist.nameEmpty".into()));
     }
     let id = state.db.lock().expect("db").create_playlist(name.trim())?;
-    playlists_changed(&state);
     Ok(id)
 }
 
@@ -309,14 +302,12 @@ fn rename_playlist(state: State<'_, AppState>, id: String, name: String) -> AppR
         return Err(AppError::Message("playlist.nameEmpty".into()));
     }
     state.db.lock().expect("db").rename_playlist(&id, name.trim())?;
-    playlists_changed(&state);
     Ok(())
 }
 
 #[tauri::command(async)]
 fn delete_playlist(state: State<'_, AppState>, id: String) -> AppResult<()> {
     state.db.lock().expect("db").delete_playlist(&id)?;
-    playlists_changed(&state);
     Ok(())
 }
 
@@ -327,7 +318,6 @@ fn add_to_playlist(state: State<'_, AppState>, playlist_id: String, content_id: 
         .lock()
         .expect("db")
         .add_to_playlist(&playlist_id, content_id.as_deref(), local_file_id.as_deref())?;
-    playlists_changed(&state);
     let _ = state.net.tx.send(net::Cmd::Publish);
     Ok(())
 }
@@ -344,14 +334,12 @@ fn remove_playlist_member(
         .lock()
         .expect("db")
         .remove_member(&playlist_id, content_id.as_deref(), local_file_id.as_deref())?;
-    playlists_changed(&state);
     Ok(())
 }
 
 #[tauri::command(async)]
 fn move_playlist_member(state: State<'_, AppState>, playlist_id: String, from: usize, to: usize) -> AppResult<()> {
     state.db.lock().expect("db").move_member(&playlist_id, from, to)?;
-    playlists_changed(&state);
     Ok(())
 }
 
@@ -418,8 +406,8 @@ fn update_setting(app: AppHandle, state: State<'_, AppState>, key: String, value
         let _ = state.net.tx.send(net::Cmd::AutoSync("appearance".into()));
         return Ok(());
     }
-    let mini = key == "miniPlayer" && value.as_bool().unwrap_or(false);
-    let appearance = key == "miniPlayer" || key == "closeAction";
+    let mini_key = key == "miniPlayer" || key == "miniTray";
+    let appearance = mini_key || key == "closeAction";
     db.set_device_setting(&key, value)?;
     if appearance {
         db.mark_dirty("appearance", true)?;
@@ -427,9 +415,10 @@ fn update_setting(app: AppHandle, state: State<'_, AppState>, key: String, value
     if key == "historyCap" {
         db.trim_history()?;
     }
+    let (on_minimize, in_tray) = db.mini_flags();
     drop(db);
-    if key == "miniPlayer" {
-        desktop::sync_mini(&app, mini);
+    if mini_key {
+        desktop::sync_mini(&app, on_minimize, in_tray);
     }
     if appearance {
         let _ = state.net.tx.send(net::Cmd::AutoSync("appearance".into()));
@@ -592,10 +581,8 @@ fn move_membership(state: State<'_, AppState>, previous: String, next: String, a
     )?;
     db.retarget_library_order(&previous, &next)?;
     db.mark_dirty("favorites", true)?;
-    db.mark_dirty("playlists", true)?;
     drop(db);
     let _ = state.net.tx.send(net::Cmd::AutoSync("favorites".into()));
-    let _ = state.net.tx.send(net::Cmd::AutoSync("playlists".into()));
     Ok(())
 }
 
@@ -638,7 +625,7 @@ pub fn run() {
             let db = Arc::new(Mutex::new(db));
             let net = net::spawn(app.handle().clone(), db.clone(), material.clone_for_net())?;
             let _ = net.tx.send(net::Cmd::Apply);
-            let mini = db.lock().expect("db").setting_bool("miniPlayer").unwrap_or(false);
+            let (on_minimize, in_tray) = db.lock().expect("db").mini_flags();
             let worker = BackgroundWork {
                 app: app.handle().clone(),
                 db: db.clone(),
@@ -648,7 +635,7 @@ pub fn run() {
             std::thread::spawn(move || worker.run());
             app.manage(AppState { db, net, material });
             desktop::install(app.handle());
-            desktop::sync_mini(app.handle(), mini);
+            desktop::sync_mini(app.handle(), on_minimize, in_tray);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -728,7 +715,6 @@ impl BackgroundWork {
                 let _ = self.tx.send(net::Cmd::Publish);
                 if hashed {
                     let _ = self.tx.send(net::Cmd::AutoSync("favorites".into()));
-                    let _ = self.tx.send(net::Cmd::AutoSync("playlists".into()));
                 }
                 last_emit = Instant::now();
                 changed = false;
@@ -773,10 +759,12 @@ impl BackgroundWork {
                     }
                 }
             }
-            Err(_) => {
-                // The song currently playing may refuse a second reader. Leave it for a later pass.
+            Err(err) => {
+                // Only a file that is gone or forbidden is unreadable. A busy file, or the song
+                // currently playing that refuses a second reader, is left for a later pass.
+                let permanent = matches!(err.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied);
                 let playing_this = playing && current == Some(job.local_file_id.as_str());
-                if !playing_this {
+                if permanent && !playing_this {
                     if let Ok(guard) = self.db.lock() {
                         let _ = scan::mark_unreadable(&guard, &job.local_file_id);
                     }

@@ -121,7 +121,7 @@ const settings: Record<string, unknown> = {
   historyCap: 100,
   incognito: false,
   syncSources: { favorites: "dev-studio" },
-  syncBlocks: { playlists: { manual: true } },
+  syncBlocks: {},
   exposeDefault: "hide",
   positionSyncDevice: "",
   downloadFolder: "",
@@ -137,7 +137,7 @@ const settings: Record<string, unknown> = {
   displayName: "Desk PC",
   listenPort: 22000,
   manualAddresses: ["192.168.1.24:22000"],
-  dirty: { playlists: true },
+  dirty: {},
 };
 
 const state = {
@@ -257,6 +257,7 @@ function bootstrap(): Bootstrap {
     history: [...state.history],
     pending: structuredClone(state.pending) as Bootstrap["pending"],
     tracks: orderedLibrary(),
+    favoriteIds: orderedLibrary().map((track) => track.contentId).filter((id): id is string => Boolean(id && tracks.find((item) => item.contentId === id)?.favorite)),
     listenPort: params.has("portbusy") ? 22111 : 22000,
     portFallback: params.has("portbusy") ? 22000 : null,
     localAddresses: ["192.168.1.20", "10.0.0.8"],

@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import { useApp } from "../app/model";
+import { albumId } from "../lib/library";
 import { Icons } from "../ui/icons";
 
 export function ContextMenu() {
@@ -100,7 +101,7 @@ export function ContextMenu() {
           <>
             <hr />
             {one.artist && <Item icon={<Icons.artist />} label={t("menu.goArtist")} onClick={run(() => app.navigate({ name: "artist", id: one.artist }))} />}
-            {one.album && <Item icon={<Icons.album />} label={t("menu.goAlbum")} onClick={run(() => app.navigate({ name: "album", id: one.album }))} />}
+            {one.album && <Item icon={<Icons.album />} label={t("menu.goAlbum")} onClick={run(() => app.navigate({ name: "album", id: albumId(one.artist, one.album) }))} />}
             {one.localFileId && one.accessStatus === "available" && (
               <Item icon={<Icons.folder />} label={t("menu.showInFolder")} onClick={run(() => void api.showInFolder(one.localFileId!).catch(app.say))} />
             )}

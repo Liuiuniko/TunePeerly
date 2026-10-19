@@ -4,7 +4,7 @@ import { mirrorPosition, useApp, type PlaybackMirror } from "../app/model";
 import { Cover } from "../components/Cover";
 import { Mascot } from "../components/Mascot";
 import { tintFor } from "../lib/format";
-import { displayTitle, trackKey } from "../lib/library";
+import { albumId, displayTitle, trackKey } from "../lib/library";
 import { activeLine, parseLyrics, type Lyrics } from "../lib/lrc";
 import { clock, transport } from "../player/clock";
 import { Icons } from "../ui/icons";
@@ -64,7 +64,7 @@ export function NowPlayingPage() {
             {track.album && (
               <>
                 <span className="dot-sep">·</span>
-                <button type="button" className="link" onClick={() => app.navigate({ name: "album", id: track.album })}>
+                <button type="button" className="link" onClick={() => app.navigate({ name: "album", id: albumId(track.artist, track.album) })}>
                   {track.album}
                 </button>
               </>

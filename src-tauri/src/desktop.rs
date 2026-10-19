@@ -1,7 +1,8 @@
 //! Window chrome and the system “now playing” surface.
 //!
-//! Windows replaces the taskbar thumbnail with a media card and shows the song on the lock screen.
+//! Windows replaces the taskbar thumbnail with a media card (the whole cover) and shows the song on the lock screen.
 //! The optional corner bar is a second window that only sends commands back to the main one.
+//! It appears when the main window is minimized and/or hidden to the tray, as the settings say.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -15,7 +16,13 @@ static ALLOW_CLOSE: AtomicBool = AtomicBool::new(false);
 static TRAY_SHOW: Mutex<Option<MenuItem<tauri::Wry>>> = Mutex::new(None);
 static TRAY_QUIT: Mutex<Option<MenuItem<tauri::Wry>>> = Mutex::new(None);
 
+/// Show the corner bar while the main window is minimized.
 static MINI_ON: AtomicBool = AtomicBool::new(false);
+/// Show the corner bar while the main window is hidden in the tray.
+static MINI_TRAY: AtomicBool = AtomicBool::new(true);
+/// The user closed the bar with its cross. It stays away until the main window is open again.
+static MINI_DISMISSED: AtomicBool = AtomicBool::new(false);
+static MINI_SHOWN: AtomicBool = AtomicBool::new(false);
 static MINI_PLACED: AtomicBool = AtomicBool::new(false);
 static TRACK: LazyLock<Mutex<DesktopTrack>> = LazyLock::new(|| Mutex::new(DesktopTrack::default()));
 
@@ -99,6 +106,8 @@ pub fn install(app: &AppHandle) {
         mini.on_window_event(move |event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                MINI_DISMISSED.store(true, Ordering::Relaxed);
+                MINI_SHOWN.store(false, Ordering::Relaxed);
                 let _ = mini_window.hide();
             }
         });
@@ -189,12 +198,10 @@ pub fn quit(app: &AppHandle) {
 }
 
 pub fn hide_to_tray(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("mini") {
-        let _ = window.hide();
-    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
+    refresh_mini(app);
 }
 
 pub fn show_main(app: &AppHandle) {
@@ -202,6 +209,7 @@ pub fn show_main(app: &AppHandle) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    refresh_mini(app);
 }
 
 pub fn update(app: &AppHandle, track: DesktopTrack) {
@@ -217,27 +225,52 @@ pub fn current() -> DesktopTrack {
     TRACK.lock().map(|guard| guard.clone()).unwrap_or_default()
 }
 
-pub fn sync_mini(app: &AppHandle, enabled: bool) {
-    MINI_ON.store(enabled, Ordering::Relaxed);
-    let minimized = app.get_webview_window("main").and_then(|window| window.is_minimized().ok()).unwrap_or(false);
-    apply_mini(app, enabled && minimized);
+/// `minimized`: show the bar while the window is minimized. `tray`: show it while the window is hidden in the tray.
+pub fn sync_mini(app: &AppHandle, minimized: bool, tray: bool) {
+    MINI_ON.store(minimized, Ordering::Relaxed);
+    MINI_TRAY.store(tray, Ordering::Relaxed);
+    refresh_mini(app);
+}
+
+/// Shows or hides the corner bar to match the main window and the settings.
+pub fn refresh_mini(app: &AppHandle) {
+    let Some(main) = app.get_webview_window("main") else { return };
+    let visible = main.is_visible().unwrap_or(true);
+    let minimized = main.is_minimized().unwrap_or(false);
+    if visible && !minimized {
+        // The window is open again, so a closed bar may come back the next time.
+        MINI_DISMISSED.store(false, Ordering::Relaxed);
+    }
+    let wanted = (MINI_ON.load(Ordering::Relaxed) && visible && minimized) || (MINI_TRAY.load(Ordering::Relaxed) && !visible);
+    apply_mini(app, wanted && !MINI_DISMISSED.load(Ordering::Relaxed));
 }
 
 pub fn command(app: &AppHandle, action: &str) {
-    if action == "restore" {
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.unminimize();
-            let _ = main.show();
-            let _ = main.set_focus();
+    match action {
+        "restore" => {
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.unminimize();
+                let _ = main.show();
+                let _ = main.set_focus();
+            }
+            refresh_mini(app);
         }
-        apply_mini(app, false);
-        return;
+        // The cross on the bar closes only the bar. It returns the next time the window is minimized or hidden.
+        "closeMini" => {
+            MINI_DISMISSED.store(true, Ordering::Relaxed);
+            apply_mini(app, false);
+        }
+        _ => {
+            let _ = app.emit_to("main", "desktop-action", serde_json::json!({ "action": action }));
+        }
     }
-    let _ = app.emit_to("main", "desktop-action", serde_json::json!({ "action": action }));
 }
 
 fn apply_mini(app: &AppHandle, show: bool) {
     let Some(mini) = app.get_webview_window("mini") else { return };
+    if MINI_SHOWN.swap(show, Ordering::AcqRel) == show {
+        return;
+    }
     if !show {
         let _ = mini.hide();
         return;
@@ -264,10 +297,13 @@ mod windows_media {
     use std::cell::RefCell;
     use std::sync::Mutex;
 
-    use super::{apply_mini, command, DesktopTrack, MINI_ON};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    use super::{command, refresh_mini, DesktopTrack};
     use tauri::{AppHandle, Manager};
     use windows::{
-            core::{factory, HSTRING},
+        core::{factory, w, HSTRING},
         Foundation::{TimeSpan, TypedEventHandler},
         Media::{
             MediaPlaybackStatus, MediaPlaybackType, SystemMediaTransportControls, SystemMediaTransportControlsButton,
@@ -275,11 +311,15 @@ mod windows_media {
         },
         Storage::Streams::{DataWriter, InMemoryRandomAccessStream, RandomAccessStreamReference},
         Win32::{
-            Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+            Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
             Graphics::{
-                Dwm::{DwmInvalidateIconicBitmaps, DwmSetIconicThumbnail, DwmSetWindowAttribute, DWMWINDOWATTRIBUTE},
+                Dwm::{
+                    DwmInvalidateIconicBitmaps, DwmSetIconicLivePreviewBitmap, DwmSetIconicThumbnail, DwmSetWindowAttribute,
+                    DWMWINDOWATTRIBUTE,
+                },
                 Gdi::{
-                    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ,
+                    ClientToScreen, CreateBitmap, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject, BITMAPINFO,
+                    BITMAPINFOHEADER, DIB_RGB_COLORS, HDC, HGDIOBJ,
                 },
             },
             System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
@@ -289,7 +329,11 @@ mod windows_media {
                     DefSubclassProc, ITaskbarList3, SetWindowSubclass, TaskbarList, THUMBBUTTON, THUMBBUTTONMASK, THBF_ENABLED,
                     THBN_CLICKED, THB_FLAGS, THB_ICON, THB_TOOLTIP,
                 },
-                WindowsAndMessaging::{CreateIconIndirect, GetSystemMetrics, ICONINFO, SM_CXSMICON, WM_COMMAND, WM_SIZE},
+                WindowsAndMessaging::{
+                    CreateIconIndirect, GetClientRect, GetSystemMetrics, GetWindowPlacement, GetWindowRect, IsIconic,
+                    IsWindowVisible, RegisterWindowMessageW, ICONINFO, SM_CXSMICON, WINDOWPLACEMENT, WINDOWPOS, WM_COMMAND,
+                    WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGING,
+                },
             },
         },
     };
@@ -337,9 +381,8 @@ mod windows_media {
         unsafe {
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &DWMWA_COLOR_NONE as *const _ as *const _, 4);
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_ROUND as *const _ as *const _, 4);
-            let yes: i32 = 1;
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_FORCE_ICONIC_REPRESENTATION, &yes as *const _ as *const _, 4);
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_HAS_ICONIC_BITMAP, &yes as *const _ as *const _, 4);
+            mark_iconic(hwnd);
+            TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarButtonCreated")), Ordering::Relaxed);
             let _ = SetWindowSubclass(hwnd, Some(subclass), 1, 0);
         }
         let Ok(interop) = factory::<SystemMediaTransportControls, ISystemMediaTransportControlsInterop>() else { return };
@@ -443,6 +486,10 @@ mod windows_media {
             }
             refresh_buttons(shell, track);
             if metadata_changed {
+                // Decode the cover now, off the interface thread, so the next hover only has to scale it.
+                if let Some(path) = track.cover_path.clone() {
+                    std::thread::spawn(move || prepare_card(&path));
+                }
                 let _ = unsafe { DwmInvalidateIconicBitmaps(shell.hwnd) };
             }
             let _ = app;
@@ -479,9 +526,36 @@ mod windows_media {
                 let _ = shell.taskbar.ThumbBarUpdateButtons(shell.hwnd, &buttons);
             } else if shell.taskbar.ThumbBarAddButtons(shell.hwnd, &buttons).is_ok() {
                 shell.buttons = true;
+            } else if shell.taskbar.ThumbBarUpdateButtons(shell.hwnd, &buttons).is_ok() {
+                // They were already there, so only the state needed refreshing.
+                shell.buttons = true;
             }
         }
         let _ = &mut buttons;
+    }
+
+    /// Explorer drops the thumbnail buttons whenever the taskbar button goes away (the window was hidden to the tray)
+    /// and tells the window with this message once the button is back. Add them again from the current song.
+    static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
+    fn taskbar_button_created(hwnd: HWND) {
+        unsafe { mark_iconic(hwnd) };
+        SHELL.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            let Some(shell) = guard.as_mut() else { return };
+            shell.buttons = false;
+            refresh_buttons(shell, &super::current());
+            let _ = unsafe { DwmInvalidateIconicBitmaps(shell.hwnd) };
+        });
+    }
+
+    /// The card and the peek come from this program, so Windows must ask for them instead of drawing the window.
+    unsafe fn mark_iconic(hwnd: HWND) {
+        let yes: i32 = 1;
+        unsafe {
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_FORCE_ICONIC_REPRESENTATION, &yes as *const _ as *const _, 4);
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_HAS_ICONIC_BITMAP, &yes as *const _ as *const _, 4);
+        }
     }
 
     fn thumb(id: u32, icon: windows::Win32::UI::WindowsAndMessaging::HICON, tip: &str) -> THUMBBUTTON {
@@ -508,6 +582,29 @@ mod windows_media {
                 paint_thumbnail(hwnd, width.max(1), height.max(1));
                 LRESULT(0)
             }
+            WM_DWMSENDICONICLIVEPREVIEWBITMAP => {
+                paint_peek(hwnd);
+                LRESULT(0)
+            }
+            _ if msg != 0 && msg == TASKBAR_CREATED.load(Ordering::Relaxed) => {
+                taskbar_button_created(hwnd);
+                unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+            }
+            WM_SYSCOMMAND => {
+                // The minimize button and the taskbar both send this first. Keep a picture for the peek.
+                if (wparam.0 & 0xFFF0) as u32 == SC_MINIMIZE {
+                    remember_window(hwnd);
+                }
+                unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+            }
+            WM_WINDOWPOSCHANGING => {
+                // A window that is about to be minimized is moved off screen. Take its picture while it can still be drawn.
+                let pos = unsafe { &*(lparam.0 as *const WINDOWPOS) };
+                if pos.x == OFFSCREEN && pos.y == OFFSCREEN {
+                    remember_window(hwnd);
+                }
+                unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+            }
             WM_COMMAND => {
                 let note = ((wparam.0 as u32) >> 16) as u16;
                 let button = (wparam.0 as u32) & 0xFFFF;
@@ -530,7 +627,7 @@ mod windows_media {
                 let kind = wparam.0 as u32;
                 if kind == SIZE_MINIMIZED || kind == SIZE_RESTORED || kind == SIZE_MAXIMIZED {
                     if let Some(app) = APP.lock().ok().and_then(|guard| guard.clone()) {
-                        apply_mini(&app, MINI_ON.load(std::sync::atomic::Ordering::Relaxed) && kind == SIZE_MINIMIZED);
+                        refresh_mini(&app);
                     }
                 }
                 unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
@@ -540,64 +637,290 @@ mod windows_media {
     }
 
     const WM_DWMSEND: u32 = 0x0323;
+    const WM_DWMSENDICONICLIVEPREVIEWBITMAP: u32 = 0x0326;
 
-    fn paint_thumbnail(hwnd: HWND, width: i32, height: i32) {
-        let track = super::current();
-        unsafe {
-            let screen = GetDC(None);
-            let mut info = BITMAPINFO::default();
-            info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-            info.bmiHeader.biWidth = width;
-            info.bmiHeader.biHeight = -height;
-            info.bmiHeader.biPlanes = 1;
-            info.bmiHeader.biBitCount = 32;
-            info.bmiHeader.biCompression = 0;
-            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-            let Ok(bitmap) = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0) else {
-                ReleaseDC(None, screen);
-                return;
-            };
-            if !bits.is_null() {
-                fill_cover(bits as *mut u8, width, height, track.cover_path.as_deref());
+    /// Top-down BGRA pixels, opaque.
+    struct Pixels {
+        width: i32,
+        height: i32,
+        bgra: Vec<u8>,
+    }
+
+    /// The cover as decoded, at most `COVER_EDGE` on its longest side. Decoded once per song.
+    static COVER: Mutex<Option<(String, Arc<image::RgbaImage>)>> = Mutex::new(None);
+    /// The last card that was drawn, with the box it was drawn for.
+    static CARD: Mutex<Option<(String, i32, i32, Arc<Pixels>)>> = Mutex::new(None);
+    /// The size of the box Windows last asked for, so a new song's card can be made before the next hover.
+    static LAST_BOX: Mutex<(i32, i32)> = Mutex::new((0, 0));
+    const COVER_EDGE: u32 = 640;
+
+    fn cover_image(path: &str) -> Option<Arc<image::RgbaImage>> {
+        if let Some((known, image)) = COVER.lock().ok()?.as_ref() {
+            if known == path {
+                return Some(image.clone());
             }
-            let _ = DwmSetIconicThumbnail(hwnd, bitmap, 0);
-            let _ = DeleteObject(HGDIOBJ(bitmap.0));
-            ReleaseDC(None, screen);
+        }
+        let mut rgba = image::open(path).ok()?.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let longest = width.max(height);
+        if longest > COVER_EDGE {
+            let scale = COVER_EDGE as f32 / longest as f32;
+            let to_w = ((width as f32 * scale).round() as u32).max(1);
+            let to_h = ((height as f32 * scale).round() as u32).max(1);
+            rgba = image::imageops::resize(&rgba, to_w, to_h, image::imageops::FilterType::Triangle);
+        }
+        let image = Arc::new(rgba);
+        if let Ok(mut slot) = COVER.lock() {
+            *slot = Some((path.to_string(), image.clone()));
+        }
+        Some(image)
+    }
+
+    /// The whole cover, scaled down in proportion to fit inside the box. Nothing is cropped, so a wide or tall
+    /// cover gives a wide or tall card. Without a cover it is a plain dark square.
+    fn card(max_w: i32, max_h: i32, path: Option<&str>) -> Arc<Pixels> {
+        let key = path.unwrap_or("").to_string();
+        if let Ok(slot) = CARD.lock() {
+            if let Some((known, w, h, pixels)) = slot.as_ref() {
+                if *known == key && *w == max_w && *h == max_h {
+                    return pixels.clone();
+                }
+            }
+        }
+        let drawn = match path.and_then(cover_image) {
+            Some(image) => {
+                let (source_w, source_h) = image.dimensions();
+                let scale = (max_w as f32 / source_w as f32).min(max_h as f32 / source_h as f32);
+                let to_w = ((source_w as f32 * scale).round() as i32).clamp(1, max_w);
+                let to_h = ((source_h as f32 * scale).round() as i32).clamp(1, max_h);
+                let fitted = if (to_w as u32, to_h as u32) == (source_w, source_h) {
+                    (*image).clone()
+                } else {
+                    image::imageops::resize(&*image, to_w as u32, to_h as u32, image::imageops::FilterType::CatmullRom)
+                };
+                let mut bgra = Vec::with_capacity((to_w * to_h * 4) as usize);
+                for pixel in fitted.pixels() {
+                    bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 0xFF]);
+                }
+                Pixels { width: to_w, height: to_h, bgra }
+            }
+            None => {
+                let edge = max_w.min(max_h).clamp(1, 512);
+                let bgra = [0x14u8, 0x12, 0x10, 0xFF].repeat((edge * edge) as usize);
+                Pixels { width: edge, height: edge, bgra }
+            }
+        };
+        let drawn = Arc::new(drawn);
+        if let Ok(mut slot) = CARD.lock() {
+            *slot = Some((key, max_w, max_h, drawn.clone()));
+        }
+        drawn
+    }
+
+    /// Prepares the card for the box Windows last used, so the hover after a song change has nothing to compute.
+    fn prepare_card(path: &str) {
+        let _ = cover_image(path);
+        let (w, h) = LAST_BOX.lock().map(|guard| *guard).unwrap_or((0, 0));
+        if w > 0 && h > 0 {
+            let _ = card(w, h, Some(path));
         }
     }
 
-    fn fill_cover(bits: *mut u8, width: i32, height: i32, path: Option<&str>) {
-        let count = (width * height) as usize;
-        let pixels = unsafe { std::slice::from_raw_parts_mut(bits, count * 4) };
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[0] = 0x14;
-            pixel[1] = 0x12;
-            pixel[2] = 0x10;
-            pixel[3] = 0xFF;
+    fn make_bitmap(width: i32, height: i32, bgra: &[u8]) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+        if width <= 0 || height <= 0 || bgra.len() < (width * height * 4) as usize {
+            return None;
         }
-        let Some(path) = path else { return };
-        let Ok(image) = image::open(path) else { return };
-        let rgba = image.to_rgba8();
-        let (source_w, source_h) = rgba.dimensions();
-        if source_w == 0 || source_h == 0 || width <= 0 || height <= 0 {
+        unsafe {
+            let screen = GetDC(None);
+            let info = dib_info(width, height);
+            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok();
+            ReleaseDC(None, screen);
+            let bitmap = bitmap?;
+            if bits.is_null() {
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+                return None;
+            }
+            std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, (width * height * 4) as usize);
+            Some(bitmap)
+        }
+    }
+
+    /// The small card in the taskbar popup.
+    fn paint_thumbnail(hwnd: HWND, max_w: i32, max_h: i32) {
+        if let Ok(mut last) = LAST_BOX.lock() {
+            *last = (max_w, max_h);
+        }
+        let track = super::current();
+        let pixels = card(max_w, max_h, track.cover_path.as_deref());
+        let Some(bitmap) = make_bitmap(pixels.width, pixels.height, &pixels.bgra) else { return };
+        unsafe {
+            let _ = DwmSetIconicThumbnail(hwnd, bitmap, 0);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        }
+    }
+
+    /// The card centered on a dark canvas of the given size, for when no window picture exists.
+    fn card_canvas(width: i32, height: i32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+        let track = super::current();
+        let pixels = card(width, height, track.cover_path.as_deref());
+        let mut canvas = [0x14u8, 0x12, 0x10, 0xFF].repeat((width * height) as usize);
+        let left = ((width - pixels.width) / 2).max(0);
+        let top = ((height - pixels.height) / 2).max(0);
+        for row in 0..pixels.height.min(height) {
+            let from = (row * pixels.width * 4) as usize;
+            let to = (((top + row) * width + left) * 4) as usize;
+            let take = (pixels.width.min(width - left) * 4) as usize;
+            canvas[to..to + take].copy_from_slice(&pixels.bgra[from..from + take]);
+        }
+        make_bitmap(width, height, &canvas)
+    }
+
+    /// The last picture of the window's client area, kept so a minimized window can still be previewed.
+    struct Snapshot {
+        width: i32,
+        height: i32,
+        /// Where the client area starts inside the window rectangle.
+        offset: POINT,
+        /// Top-down BGRA, one word per pixel.
+        pixels: Vec<u32>,
+        taken: std::time::Instant,
+    }
+
+    thread_local! {
+        static SNAPSHOT: RefCell<Option<Snapshot>> = const { RefCell::new(None) };
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn PrintWindow(hwnd: HWND, hdc: HDC, flags: u32) -> i32;
+    }
+    const PW_RENDERFULLCONTENT: u32 = 2;
+    const SC_MINIMIZE: u32 = 0xF020;
+    const OFFSCREEN: i32 = -32000;
+    /// A picture younger than this is reused, so a hover answers at once.
+    const SNAPSHOT_FRESH: std::time::Duration = std::time::Duration::from_millis(1500);
+
+    fn dib_info(width: i32, height: i32) -> BITMAPINFO {
+        let mut info = BITMAPINFO::default();
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = 0;
+        info
+    }
+
+    /// Takes the real interface (WebView included) as it is drawn now. None while the window is minimized or hidden.
+    fn capture_window(hwnd: HWND) -> Option<Snapshot> {
+        unsafe {
+            if IsIconic(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() {
+                return None;
+            }
+            let mut frame = RECT::default();
+            let mut client = RECT::default();
+            GetWindowRect(hwnd, &mut frame).ok()?;
+            GetClientRect(hwnd, &mut client).ok()?;
+            let (full_w, full_h) = (frame.right - frame.left, frame.bottom - frame.top);
+            let (width, height) = (client.right - client.left, client.bottom - client.top);
+            if full_w <= 0 || full_h <= 0 || width <= 0 || height <= 0 || full_w > 8192 || full_h > 8192 {
+                return None;
+            }
+            let mut origin = POINT { x: 0, y: 0 };
+            if !ClientToScreen(hwnd, &mut origin).as_bool() {
+                return None;
+            }
+            let offset = POINT { x: origin.x - frame.left, y: origin.y - frame.top };
+
+            let screen = GetDC(None);
+            let info = dib_info(full_w, full_h);
+            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok();
+            let dc = CreateCompatibleDC(Some(screen));
+            ReleaseDC(None, screen);
+            let Some(bitmap) = bitmap else {
+                let _ = DeleteDC(dc);
+                return None;
+            };
+            let old = SelectObject(dc, HGDIOBJ(bitmap.0));
+            let drawn = !bits.is_null() && PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT) != 0;
+            SelectObject(dc, old);
+            let _ = DeleteDC(dc);
+            let mut snapshot = None;
+            if drawn {
+                let source = std::slice::from_raw_parts(bits as *const u32, (full_w * full_h) as usize);
+                let mut pixels = vec![0u32; (width * height) as usize];
+                let from_x = offset.x.max(0);
+                let take = width.min(full_w - from_x);
+                if take > 0 {
+                    for row in 0..height {
+                        let from_y = row + offset.y;
+                        if from_y < 0 || from_y >= full_h {
+                            continue;
+                        }
+                        let src = (from_y * full_w + from_x) as usize;
+                        let dst = (row * width) as usize;
+                        pixels[dst..dst + take as usize].copy_from_slice(&source[src..src + take as usize]);
+                    }
+                }
+                for pixel in pixels.iter_mut() {
+                    *pixel |= 0xFF00_0000;
+                }
+                snapshot = Some(Snapshot { width, height, offset, pixels, taken: std::time::Instant::now() });
+            }
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            snapshot
+        }
+    }
+
+    fn remember_window(hwnd: HWND) {
+        if let Some(snapshot) = capture_window(hwnd) {
+            SNAPSHOT.with(|slot| *slot.borrow_mut() = Some(snapshot));
+        }
+    }
+
+    fn snapshot_bitmap(snapshot: &Snapshot) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+        let bytes = unsafe { std::slice::from_raw_parts(snapshot.pixels.as_ptr() as *const u8, snapshot.pixels.len() * 4) };
+        make_bitmap(snapshot.width, snapshot.height, bytes)
+    }
+
+    /// The big preview when the taskbar popup is hovered: the real interface. An open window is drawn now
+    /// (or reused if it was drawn a moment ago); a minimized one cannot be drawn, so it shows the picture
+    /// taken just before it was minimized.
+    fn paint_peek(hwnd: HWND) {
+        let stale = SNAPSHOT.with(|slot| slot.borrow().as_ref().is_none_or(|snapshot| snapshot.taken.elapsed() > SNAPSHOT_FRESH));
+        if stale {
+            remember_window(hwnd);
+        }
+        let shown = SNAPSHOT.with(|slot| {
+            let slot = slot.borrow();
+            let snapshot = slot.as_ref()?;
+            let bitmap = snapshot_bitmap(snapshot)?;
+            unsafe {
+                let _ = DwmSetIconicLivePreviewBitmap(hwnd, bitmap, Some(&snapshot.offset), 0);
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            }
+            Some(())
+        });
+        if shown.is_some() {
             return;
         }
-        let scale = (width as f32 / source_w as f32).max(height as f32 / source_h as f32);
-        let crop_w = ((width as f32 / scale).round() as u32).clamp(1, source_w);
-        let crop_h = ((height as f32 / scale).round() as u32).clamp(1, source_h);
-        let origin_x = (source_w - crop_w) / 2;
-        let origin_y = (source_h - crop_h) / 2;
-        let cropped = image::imageops::crop_imm(&rgba, origin_x, origin_y, crop_w, crop_h).to_image();
-        let fitted = image::imageops::resize(&cropped, width as u32, height as u32, image::imageops::FilterType::Lanczos3);
-        for (index, sample) in fitted.pixels().enumerate() {
-            let offset = index * 4;
-            if offset + 3 >= pixels.len() {
-                break;
-            }
-            pixels[offset] = sample[2];
-            pixels[offset + 1] = sample[1];
-            pixels[offset + 2] = sample[0];
-            pixels[offset + 3] = 0xFF;
+        // Nothing was ever drawn (for example it started minimized): show the card at the restored size.
+        let mut place = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        if unsafe { GetWindowPlacement(hwnd, &mut place) }.is_err() {
+            return;
+        }
+        let area = place.rcNormalPosition;
+        let width = (area.right - area.left).clamp(1, 4096);
+        let height = (area.bottom - area.top).clamp(1, 4096);
+        let Some(bitmap) = card_canvas(width, height) else { return };
+        unsafe {
+            let _ = DwmSetIconicLivePreviewBitmap(hwnd, bitmap, None, 0);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
         }
     }
 

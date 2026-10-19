@@ -44,7 +44,7 @@ export function Sidebar({ width, collapsed, onResize, onCollapse }: { width: num
       case "albums":
         return groupTracks(app.library, "album")
           .filter((group) => group.name)
-          .map((group) => ({ key: group.name, title: group.name, sub: group.tracks[0]?.artist || t("kind.album"), cover: <Cover src={group.cover} />, open: go({ name: "album", id: group.name }), active: is("album", group.name) }));
+          .map((group) => ({ key: group.id, title: group.name || t("library.unknownAlbum"), sub: group.tracks[0]?.artist || t("kind.album"), cover: <Cover src={group.cover} />, open: go({ name: "album", id: group.id }), active: is("album", group.id) }));
       case "folders":
         return groupTracks(app.library, "folder").map((group) => ({ key: group.name, title: folderName(group.name), sub: group.name, cover: <Cover src={group.cover} icon="folder" />, open: go({ name: "folder", id: group.name }), active: is("folder", group.name) }));
       case "devices":

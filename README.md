@@ -8,7 +8,7 @@ TunePeerly (声渡) plays the music already on your computer and shares it with 
 
 - Play local files, stream an exposed song from a paired device, or download the original file.
 - Find devices on the LAN, connect by address, or pair by pasting a code. Both sides confirm. Sync traffic is end-to-end encrypted with libsignal.
-- Sync liked songs, playlists, and appearance as a full copy. Auto send pushes your edits out. Follow pulls later edits from one device. Send and Override are manual.
+- Sync liked songs and appearance as a full copy. Auto send pushes your edits out. Follow pulls later edits from one device. Send and Override are manual.
 - Merge recently played by the latest UTC time. Optionally merge again when this computer comes online.
 - Follow playback from one online device. The bar at the bottom shows that device's song and moves with it. This computer stays silent.
 - Incognito pauses discovery, sync, and history recording. You can also block a device, or stop manual sync and following per item.

@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import { mirrorPosition, useApp } from "../app/model";
 import { Card, Shelf } from "../components/Card";
 import { Cover, LikedCover } from "../components/Cover";
-import { SyncButton } from "../components/SyncButton";
 import { Mascot } from "../components/Mascot";
 import { clockText, greetingKey } from "../lib/format";
 import { covers, displayTitle, trackKey } from "../lib/library";
@@ -80,12 +79,7 @@ export function HomePage() {
 
       <Shelf
         title={t("home.playlists")}
-        action={
-          <span className="shelf-actions">
-            <SyncButton feature="playlists" playlists quiet />
-            <button type="button" className="link-btn" onClick={() => app.createPlaylist([], true)}><Icons.plus /> {t("playlist.create")}</button>
-          </span>
-        }
+        action={<button type="button" className="link-btn" onClick={() => app.createPlaylist([], true)}><Icons.plus /> {t("playlist.create")}</button>}
       >
         <Card cover={covers(app.liked, 1, "liked")[0] ? <Cover src={covers(app.liked, 1, "liked")[0]} /> : <LikedCover />} title={t("nav.liked")} subtitle={t("list.songCount", { count: app.liked.length })} dropId="liked" onOpen={() => app.navigate({ name: "liked" })} onPlay={() => app.playAll(app.liked, "liked")} />
         {playlists.map((playlist) => {

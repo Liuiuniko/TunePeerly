@@ -33,7 +33,8 @@ export function BrowsePage({ kind }: { kind: keyof typeof fields }) {
         <div className="card-grid">
           {groups.map((group) => {
             const name = kind === "folders" ? folderName(group.name) : group.name || (kind === "artists" ? t("library.unknownArtist") : t("library.unknownAlbum"));
-            const contextId = `${targets[kind]}:${group.name}`;
+            const routeId = group.id;
+            const contextId = `${targets[kind]}:${routeId}`;
             const subtitle =
               kind === "albums"
                 ? [...new Set(group.tracks.map((track) => track.artist).filter(Boolean))].slice(0, 2).join(", ") || t("list.songCount", { count: group.tracks.length })
@@ -42,11 +43,11 @@ export function BrowsePage({ kind }: { kind: keyof typeof fields }) {
                   : t("list.songCount", { count: group.tracks.length });
             return (
               <Card
-                key={group.name || "_"}
+                key={group.id || "_"}
                 cover={<Cover src={group.cover} round={kind === "artists"} icon={kind === "artists" ? "artist" : kind === "folders" ? "folder" : "music"} />}
                 title={name}
                 subtitle={subtitle}
-                onOpen={() => app.navigate({ name: targets[kind], id: group.name })}
+                onOpen={() => app.navigate({ name: targets[kind], id: routeId })}
                 onPlay={() => app.playAll(app.contextTracks(contextId), contextId)}
               />
             );

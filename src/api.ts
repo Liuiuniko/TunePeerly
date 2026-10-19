@@ -53,7 +53,7 @@ export type DownloadQueueItem = { contentId: string; title: string };
 export type DownloadHistoryItem = { contentId: string; title: string; path: string; ok: boolean; at: string };
 export type DownloadFeed = { current: Download | null; queue: DownloadQueueItem[]; history: DownloadHistoryItem[] };
 export type Pending = { feature: Feature; source: string | null };
-export type Feature = "favorites" | "appearance" | "playlists" | "history";
+export type Feature = "favorites" | "appearance" | "history";
 export type BlockFlags = { manual?: boolean; source?: boolean; all?: boolean };
 
 export type Settings = {
@@ -102,6 +102,7 @@ export type Bootstrap = {
   history: string[];
   pending: Pending[];
   tracks: Track[];
+  favoriteIds?: string[];
   listenPort: number;
   portFallback?: number | null;
   localAddresses?: string[];
@@ -189,7 +190,7 @@ export async function pickFiles(): Promise<string[]> {
   const selected = await open({
     directory: false,
     multiple: true,
-    filters: [{ name: "Audio", extensions: ["flac", "mp3", "wav", "ogg", "opus", "m4a", "aac", "aiff", "aif", "alac", "wma", "ape", "wv"] }],
+    filters: [{ name: "Audio", extensions: ["flac", "mp3", "wav", "ogg", "opus", "m4a", "aac", "aiff", "aif", "alac", "wma", "ape", "wv", "wave", "oga", "m4b", "mp4", "dsf", "dff", "caf", "tta", "spx"] }],
   });
   if (typeof selected === "string") return [selected];
   return selected ?? [];

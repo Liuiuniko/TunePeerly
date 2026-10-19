@@ -8,7 +8,7 @@ import { ActionBar, PageHeader } from "../components/PageHeader";
 import { SyncButton } from "../components/SyncButton";
 import { TrackTable, type Columns } from "../components/TrackTable";
 import { tintFor, totalText } from "../lib/format";
-import { covers, filterText, folderName, sortTracks, type Sort } from "../lib/library";
+import { albumParts, covers, filterText, folderName, sortTracks, type Sort } from "../lib/library";
 import { transport } from "../player/clock";
 import { Icons } from "../ui/icons";
 
@@ -106,7 +106,6 @@ export function TrackListPage({ route }: { route: Route }) {
         {route.name === "liked" && <SyncButton feature="favorites" />}
         {playlist && (
           <>
-            <SyncButton feature="playlists" playlists />
             <button type="button" className={`icon-btn lg${sharingOpen ? " on" : ""}`} aria-label={t("playlist.sharing")} title={t("playlist.sharing")} onClick={() => setSharingOpen((value) => !value)}>
               {playlist.exposure === "hide" ? <Icons.eyeOff /> : <Icons.eye />}
             </button>
@@ -341,18 +340,18 @@ function usePageInfo(route: Route): PageInfo {
         return { ...base, kind: t("kind.artist"), title: id || t("library.unknownArtist"), cover: <Cover src={covers(tracks, 1)[0]} round icon="artist" />, tracks, contextId: `artist:${id}`, empty: t("list.empty") };
       }
       case "album": {
-        const tracks = app.library.filter((track) => track.album === id);
-        const artists = [...new Set(tracks.map((track) => track.artist).filter(Boolean))];
+        const parts = albumParts(id);
+        const tracks = app.library.filter((track) => track.album === parts.album && track.artist === parts.artist);
         return {
           ...base,
           kind: t("kind.album"),
-          title: id || t("library.unknownAlbum"),
+          title: parts.album || t("library.unknownAlbum"),
           cover: <Cover src={covers(tracks, 1)[0]} />,
           tracks,
           contextId: `album:${id}`,
           defaultSort: { key: "trackNumber", dir: 1 },
           columns: { album: false, number: "track" },
-          extraMeta: artists.length > 0 ? <strong>{artists.slice(0, 2).join(", ")}</strong> : undefined,
+          extraMeta: parts.artist ? <strong>{parts.artist}</strong> : undefined,
           empty: t("list.empty"),
         };
       }

@@ -71,7 +71,7 @@ export function sortTracks(tracks: Track[], sort: Sort): Track[] {
   const value = (track: Track): string | number => {
     switch (sort.key) {
       case "favorite":
-        return track.favorite ? 0 : 1;
+        return track.favorite ? 1 : 0;
       case "duration":
         return track.durationMs ?? 0;
       case "trackNumber":
@@ -79,10 +79,11 @@ export function sortTracks(tracks: Track[], sort: Sort): Track[] {
       case "addedAt":
         return track.addedAt;
       case "title":
+        return track.title || track.fileName;
       case "artist":
       case "album":
       case "folder":
-        return track[sort.key] || track.fileName;
+        return track[sort.key] || "";
       default:
         return 0;
     }
@@ -90,6 +91,9 @@ export function sortTracks(tracks: Track[], sort: Sort): Track[] {
   return tracks.slice().sort((left, right) => {
     const a = value(left);
     const b = value(right);
+    // A song without an artist, album or folder goes last in either direction.
+    if (a === "" && b !== "") return 1;
+    if (b === "" && a !== "") return -1;
     const primary = typeof a === "number" && typeof b === "number" ? a - b : collator.compare(String(a), String(b));
     if (primary !== 0) return primary * sort.dir;
     return collator.compare(left.title, right.title);
@@ -105,7 +109,20 @@ export function filterText(tracks: Track[], text: string): Track[] {
   });
 }
 
-export type Group = { name: string; tracks: Track[]; cover: string | null };
+export type Group = { id: string; name: string; tracks: Track[]; cover: string | null };
+
+const ALBUM_SEP = "\u0001";
+
+/** Album identity is the artist plus the album name, so two albums can share a title. */
+export function albumId(artist: string, album: string): string {
+  return `${artist}${ALBUM_SEP}${album}`;
+}
+
+export function albumParts(id: string): { artist: string; album: string } {
+  const at = id.indexOf(ALBUM_SEP);
+  if (at < 0) return { artist: "", album: id };
+  return { artist: id.slice(0, at), album: id.slice(at + 1) };
+}
 
 let coverSeed = Math.floor(Math.random() * 0x7fffffff) || 1;
 
@@ -123,12 +140,13 @@ function mix(seed: number, value: string): number {
 export function groupTracks(tracks: Track[], field: "artist" | "album" | "folder"): Group[] {
   const groups = new Map<string, Group & { rank: number }>();
   for (const track of tracks) {
-    const name = track[field] || "";
+    const name = field === "album" ? track.album || "" : track[field] || "";
+    const id = field === "album" ? albumId(track.artist, name) : name;
     if (field === "folder" && !name) continue;
-    let group = groups.get(name);
+    let group = groups.get(id);
     if (!group) {
-      group = { name, tracks: [], cover: null, rank: 0 };
-      groups.set(name, group);
+      group = { id, name, tracks: [], cover: null, rank: 0 };
+      groups.set(id, group);
     }
     group.tracks.push(track);
     if (!track.coverUrl) continue;
@@ -139,9 +157,10 @@ export function groupTracks(tracks: Track[], field: "artist" | "album" | "folder
     }
   }
   return [...groups.values()].sort((a, b) => {
+    if (!a.name && !b.name) return collator.compare(a.id, b.id);
     if (!a.name) return 1;
     if (!b.name) return -1;
-    return collator.compare(a.name, b.name);
+    return collator.compare(a.name, b.name) || collator.compare(a.id, b.id);
   });
 }
 

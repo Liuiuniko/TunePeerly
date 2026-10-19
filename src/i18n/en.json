@@ -243,6 +243,9 @@
     "unmute": "Unmute",
     "volume": "Volume"
   },
+  "mini": {
+    "close": "Close the mini player"
+  },
   "now": {
     "open": "Open Now Playing",
     "nothingTitle": "Nothing is playing",
@@ -505,11 +508,9 @@
     "pullChoose": "Overwrite from",
     "pullDefault": "Default",
     "pullTitle": "Replace this computer's {{feature}} with the copy from a connected device.",
-    "pullPlaylists": "Replace every playlist on this computer with that device's playlists.",
     "requestNone": "None",
     "thatDevice": "That device",
     "pushTitle": "Send this computer's {{feature}} to every paired device that is online.",
-    "pushPlaylists": "Send every playlist on this computer, not only this one, to every paired device that is online.",
     "pushIncognito": "Incognito is on, so nothing is sent.",
     "pushBlocked": "Manual sync for this is turned off in Settings.",
     "dirty": "Has changes that weren't synced",
@@ -522,7 +523,9 @@
     "dark": "Dark",
     "language": "Language",
     "miniPlayer": "Mini player when minimized",
-    "miniPlayerHelp": "When this window is minimized, a small bar stays in the corner with the cover, playback, and favorite.",
+    "miniPlayerHelp": "When this window is minimized, a small bar stays in the corner with the cover, playback, and favorite. Close it with its cross; it returns the next time.",
+    "miniTray": "Mini player in the tray",
+    "miniTrayHelp": "When this window is hidden in the tray, the same small bar stays in the corner. Turn both switches off for no mini player at all.",
     "closeWindow": "When closing",
     "closeWindowHelp": "\"Ask me\" shows the prompt every time. Minimizing to the tray keeps the player running in the background.",
     "closeAsk": "Ask me",

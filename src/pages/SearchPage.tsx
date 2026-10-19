@@ -120,7 +120,7 @@ export function SearchPage({ scope: initialScope }: { scope?: string }) {
       {query && albums.length > 0 && (
         <Shelf title={t("search.albums")} rail>
           {albums.map((group) => (
-            <Card key={group.name} cover={<Cover src={group.cover} />} title={group.name} subtitle={group.tracks[0]?.artist || t("kind.album")} onOpen={() => app.navigate({ name: "album", id: group.name })} onPlay={() => app.playAll(app.contextTracks(`album:${group.name}`), `album:${group.name}`)} />
+            <Card key={group.id} cover={<Cover src={group.cover} />} title={group.name} subtitle={group.tracks[0]?.artist || t("kind.album")} onOpen={() => app.navigate({ name: "album", id: group.id })} onPlay={() => app.playAll(app.contextTracks(`album:${group.id}`), `album:${group.id}`)} />
           ))}
         </Shelf>
       )}

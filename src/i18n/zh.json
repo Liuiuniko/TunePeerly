@@ -240,6 +240,9 @@
     "unmute": "取消静音",
     "volume": "音量"
   },
+  "mini": {
+    "close": "关闭迷你播放条"
+  },
   "now": {
     "open": "打开正在播放",
     "nothingTitle": "没有正在播放的歌曲",
@@ -501,11 +504,9 @@
     "pullChoose": "用这台覆盖自己",
     "pullDefault": "默认",
     "pullTitle": "用一台已连接设备上的{{feature}}覆盖这台电脑。",
-    "pullPlaylists": "用那台设备的全部歌单覆盖这台电脑上的歌单。",
     "requestNone": "未指定",
     "thatDevice": "那台设备",
     "pushTitle": "把这台电脑的{{feature}}发给所有在线的配对设备。",
-    "pushPlaylists": "发送的是这台电脑上的全部歌单，不只是当前这一个。",
     "pushIncognito": "无痕模式开着，不会发送。",
     "pushBlocked": "设置里关掉了这项的手动同步。",
     "dirty": "有尚未同步的修改",
@@ -518,7 +519,9 @@
     "dark": "深色",
     "language": "语言",
     "miniPlayer": "最小化后显示小窗",
-    "miniPlayerHelp": "主窗口最小化后，在屏幕角落留下封面、播放和收藏。",
+    "miniPlayerHelp": "主窗口最小化后，在屏幕角落留下封面、播放和收藏。点右上角的叉可以关掉，下次最小化时会再出现。",
+    "miniTray": "进入托盘后显示小窗",
+    "miniTrayHelp": "主窗口隐藏到系统托盘后，同样在屏幕角落留下小窗。两个开关都关掉就没有小窗。",
     "closeWindow": "关闭窗口时",
     "closeWindowHelp": "选“每次询问”会再次弹出提示。最小化到托盘后，播放器继续在后台运行。",
     "closeAsk": "每次询问",

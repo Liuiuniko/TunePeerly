@@ -38,9 +38,9 @@ The window has its own title bar. **When closing** in Settings → Appearance ch
 - **Minimize to tray** leaves playback running. Use the tray menu to show the window again or quit.
 - **Quit** exits.
 
-**Mini player when minimized** leaves a small bar on screen with the cover, playback controls, and the heart. Drag the empty area to move it. Click the cover or the title to open the main window.
+**Mini player when minimized** and **Mini player in the tray** leave a small bar on screen with the cover, playback controls, and the heart, when the window is minimized or hidden in the tray. Turn both off for no bar. Drag the empty area to move it. Click the cover or the title to open the main window. The cross in its corner closes only the bar; it comes back the next time the window is minimized or hidden.
 
-The Windows taskbar thumbnail has previous, play, next, and a heart. The heart is white when the song is not liked and red when it is.
+The Windows taskbar thumbnail shows the whole cover, scaled to fit, with previous, play, next, and a heart. The heart is white when the song is not liked and red when it is. Hovering the thumbnail previews the window itself.
 
 ## Playlists and exposure
 
@@ -48,7 +48,7 @@ A playlist is a list of songs. Deleting a playlist does not delete the songs.
 
 **New local songs**, in Settings → Library, decides whether a song that is not governed by a playlist is offered to paired devices. Each playlist can follow that default, always expose new songs, or never expose them. That choice applies when a song is added. **Expose all now** and **Stop exposing all** change songs that are already in the list.
 
-A paired device can see and play a song only when this computer is exposing it. Songs without a content id stay on this computer and are kept at the front of a playlist when a synced copy arrives.
+A paired device can see and play a song only when this computer is exposing it. Songs without a content id stay on this computer.
 
 ## Pair a device
 
@@ -72,7 +72,7 @@ A song offered by an online paired device can be played from that device. The pl
 
 Incognito turns sync off. Turn it off again before using this section.
 
-Liked songs, playlists, and appearance each sync as one whole copy. A copy contains the current list, not a list of individual edits.
+Liked songs and appearance each sync as one whole copy. A copy contains the current list, not a list of individual edits. Playlists stay on this computer.
 
 | Control | What it does |
 | --- | --- |
@@ -90,9 +90,7 @@ Override ignores **No manual**, **No following**, and **Stop all** on both compu
 
 **When a sync conflicts** applies when you follow a device and this computer also has changes that have not been sent. You can keep yours, take theirs, or be asked each time.
 
-Appearance sync includes the theme, the language, the mini player switch, and the close-window choice.
-
-A playlist snapshot replaces the whole set of playlists. Playlists missing from that copy are deleted. Names and order follow the copy. Songs that still have no content id stay at the front of their playlist. A playlist's expose or hide choice stays on this computer.
+Appearance sync includes the theme, the language, the two mini player switches, and the close-window choice.
 
 ## Recently played
 

@@ -85,6 +85,9 @@ export function MiniPlayer() {
       <button type="button" className={`mini-ctrl like${track?.favorite ? " on" : ""}`} aria-label={track?.favorite ? t("menu.unlike") : t("menu.like")} title={track?.favorite ? t("menu.unlike") : t("menu.like")} onClick={() => command("like")} disabled={!track?.title}>
         {track?.favorite ? <Icons.heartFill /> : <Icons.heart />}
       </button>
+      <button type="button" className="mini-close" aria-label={t("mini.close")} title={t("mini.close")} onClick={() => command("closeMini")}>
+        <Icons.close />
+      </button>
     </div>
   );
 }
