@@ -38,9 +38,9 @@ The window has its own title bar. **When closing** in Settings → Appearance ch
 - **Minimize to tray** leaves playback running. Use the tray menu to show the window again or quit.
 - **Quit** exits.
 
-**Mini player when minimized** and **Mini player in the tray** leave a small bar on screen with the cover, playback controls, and the heart, when the window is minimized or hidden in the tray. Turn both off for no bar. Drag the empty area to move it. Click the cover or the title to open the main window. The cross in its corner closes only the bar; it comes back the next time the window is minimized or hidden.
+**Mini player when minimized** and **Mini player in the tray** leave a small bar on screen with the cover, playback controls, and the heart, when the window is minimized or hidden in the tray. Turn both off for no bar. Drag the cover, the title, or the empty part of the bar to move it. Click the cover or the title to open the main window. The cross in its corner closes only the bar; it comes back the next time the window is minimized or hidden.
 
-The Windows taskbar thumbnail shows the whole cover, scaled to fit, with previous, play, next, and a heart. The heart is white when the song is not liked and red when it is. Hovering the thumbnail previews the window itself.
+The Windows taskbar thumbnail shows the whole cover, scaled down to fit, with previous, play, next, and a heart. The heart is white when the song is not liked and red when it is. Hovering that thumbnail shows a picture of this window. After the window is minimized, the picture is the one taken just before it was minimized.
 
 ## Playlists and exposure
 
@@ -50,19 +50,29 @@ A playlist is a list of songs. Deleting a playlist does not delete the songs.
 
 A paired device can see and play a song only when this computer is exposing it. Songs without a content id stay on this computer.
 
+## Unfinished settings
+
+Some settings show a short mark beside the title. The mark does not describe the problem.
+
+- **To be revised** means this version keeps the current behavior, and it will change later. The mark is on **Paired devices**, **Nearby**, **Connect by address**, **Sync**, **Auto send**, **When a sync conflicts**, **Sync recently played**, **Merge when this computer comes online**, **LAN port**, and **Device ID**.
+- **Do not use** means do not use it. The feature has problems. The mark is on **Follow playback** and **Relay**.
+- **Not completed yet, not tested** is also on **Relay**. The relay client is in this version. It is not completed yet, and it has not been tested.
+
+The rest of this guide says what those controls are for.
+
 ## Pair a device
 
-Open **Devices**.
+Open **Devices**. **Paired devices**, **Nearby**, and **Connect by address** are marked **To be revised**.
 
-- **Discover nearby devices** announces this computer's name on the local network a few times a minute. Song names are not in that announcement.
-- You can also type another computer's address and port, or paste a pairing code.
+- **Discover nearby devices** announces this computer's name about every 3 seconds, by UDP multicast and by a broadcast on each local subnet. Song names are not in that announcement.
+- You can also type another computer's IPv4 address and port.
 - Pairing finishes only after both computers accept. Until then the connection is pending.
-- After you decline a request, that device cannot ask again until **Silence after a decline** has passed. The default is 60 seconds. You can still connect to that device yourself.
+- After you decline a request, that device cannot ask again until **Silence after a decline** has passed. That setting is under History and privacy. The default is 60 seconds, and the allowed range is 1 to 86400. You can still connect to that device yourself.
 - Block removes a device. Its later traffic is dropped.
 
-Outside the local network, fill in all four relay fields under Settings → Network. The relay only forwards traffic between your devices. The devices encrypt that traffic, so the relay cannot read it.
+The four relay fields are under Settings → Network: address, port, the relay's certificate ID, and a token. When all four are set, this computer connects to that [strelaysrv](https://github.com/syncthing/relaysrv) relay, and paired devices can reach each other through it. The devices encrypt that traffic. **Relay** is marked **Not completed yet, not tested** and **Do not use**.
 
-**LAN port** is saved and reused. The allowed range is 1024–65535. If that port is busy at startup, the app listens on a temporary port and shows a warning. The saved port is not changed.
+**LAN port** and **Device ID** are under Settings → Storage, and both are marked **To be revised**. The port is saved and reused. The allowed range is 1024–65535. If that port is busy at startup, the app listens on another port for this run and shows a warning. The saved port is not changed.
 
 ## Play a song that is on another computer
 
@@ -70,9 +80,11 @@ A song offered by an online paired device can be played from that device. The pl
 
 ## Sync
 
-Incognito turns sync off. Turn it off again before using this section.
+The **Sync** heading, **Auto send**, and **When a sync conflicts** are marked **To be revised**.
 
-Liked songs and appearance each sync as one whole copy. A copy contains the current list, not a list of individual edits. Playlists stay on this computer.
+Incognito cuts every device connection, stops discovery, and turns sync off. Turn it off again before using this section.
+
+Liked songs and appearance each sync as one whole copy. A copy is the current list, not a list of individual edits. **Auto send** only offers those two. Playlists stay on this computer. Recently played has its own switches, below.
 
 | Control | What it does |
 | --- | --- |
@@ -80,27 +92,31 @@ Liked songs and appearance each sync as one whole copy. A copy contains the curr
 | Follow | When the chosen device changes that item, take its copy automatically. |
 | Send | Push this computer's copy to every paired device that is online now. |
 | Override | Ask one online device for its copy and replace this computer's copy with it. |
-| No manual | This computer does not send, and it does not answer another device's Override. |
-| No following | Ignore automatic copies. |
-| Stop all | Do not send and do not follow. |
+| No manual | This computer does not push its copy with Send. A copy another device sends here still applies. If another device asks for this computer's copy, it still receives it. |
+| No following | Ignore automatic copies from the device selected under Follow. |
+| Stop all | Do not push and do not follow. A copy another device sends here can still apply. |
 
-Override ignores **No manual**, **No following**, and **Stop all** on both computers. Incognito still blocks it. The copy you receive is the other computer's current copy.
+Incognito still blocks a copy from leaving or arriving. The copy you receive is the other computer's current copy.
 
-**When others overwrite this computer** applies when another device presses Send. **Silent** replaces your copy immediately. **Ask** waits for you to confirm. Override does not ask again, because you requested that copy.
+**When others overwrite this computer** applies when another device presses Send. **Silent** replaces the copy immediately. **Ask** waits for a confirmation. Override does not ask again, because this computer requested that copy.
 
-**When a sync conflicts** applies when you follow a device and this computer also has changes that have not been sent. You can keep yours, take theirs, or be asked each time.
+**When a sync conflicts** applies when an automatic copy arrives and this computer still has changes that were not sent. **Always keep mine** drops the incoming copy. **Always use theirs** replaces the local copy. **Ask me** waits.
 
 Appearance sync includes the theme, the language, the two mini player switches, and the close-window choice.
 
 ## Recently played
 
-A song is recorded when it finishes, unless **Pause recording** or Incognito is on. **Songs kept in Recently Played** is the maximum length of the list, from 1 to 10000.
+**Sync recently played** and **Merge when this computer comes online** are marked **To be revised**.
 
-**Sync recently played** sends that list to paired devices that are online. A device applies the list only when its own switch is on. The two lists merge by the latest UTC time for each song. Equal times keep one entry.
+A song is added after it has played for about 10 seconds, or for half its length when that is shorter. A song that ends after more than one second of playback is also added. **Pause recording** and Incognito stop this. **Songs kept in Recently Played** is the maximum length of the list, from 1 to 10000.
 
-**Merge when this computer comes online** asks every paired device for its list, merges those replies, and sends the result. Devices that do not sync history ignore the request.
+**Sync recently played** sends this computer's list to paired devices that are online. The other device merges it only when its own switch is on. For each song, the later UTC time is kept. An equal time leaves the entry that was already there.
+
+**Merge when this computer comes online** asks each paired device that is online. It waits up to 8 seconds for replies, merges them into this computer's list, then sends that list. A device with **Sync recently played** off does not answer and does not record a notification.
 
 ## Follow playback
+
+**Follow playback** is marked **Do not use**.
 
 In Settings → Network, **Follow playback** lists paired devices that are online. Choose one.
 
@@ -116,6 +132,6 @@ The bell opens the notification list. You can mark items read when they scroll i
 
 ## Where your data stays
 
-`%AppData%\Roaming\TunePeerly\library.db` holds the library, playlists, likes, history, pairings, and settings. Uninstalling the app does not delete that folder.
+`%APPDATA%\TunePeerly\library.db` holds the library, playlists, likes, history, pairings, and settings. Cover images are under `%LOCALAPPDATA%\TunePeerly\covers`. Uninstalling the app does not delete either folder.
 
-There is no account. Away from the local network, sync and streaming go through the relay you configured. The relay forwards the encrypted traffic and cannot read it.
+There is no account. Paired devices on the same local network sync and stream directly. Outside that network they can meet through the relay configured under Settings → Network. **Relay** is marked **Not completed yet, not tested** and **Do not use**.
