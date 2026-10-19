@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useApp } from "../app/model";
 import { reshuffleCovers } from "../lib/library";
+import { DownloadButton } from "./DownloadButton";
 import { Icons } from "../ui/icons";
 
 export const SEARCH_INPUT_ID = "global-search";
@@ -65,6 +66,7 @@ export function TopBar() {
         )}
       </label>
       <div className="top-actions" data-tauri-drag-region="false">
+        <DownloadButton />
         <button type="button" className={`round-btn${refreshing ? " spinning" : ""}`} aria-label={t("top.refresh")} title={t("top.refreshHelp")} disabled={!app.boot || refreshing} onClick={reload}>
           <Icons.sync />
         </button>

@@ -130,23 +130,36 @@ pub async fn serve(
     }
 }
 
+const CORS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, HEAD, OPTIONS\r\nAccess-Control-Allow-Headers: Range\r\nAccess-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges\r\n";
+
+fn status_response(code: u16, reason: &str) -> String {
+    format!("HTTP/1.1 {code} {reason}\r\n{CORS}Connection: close\r\n\r\n")
+}
+
 async fn handle(mut socket: TcpStream, bus: Arc<AudioBus>, pulls: mpsc::UnboundedSender<Pull>) -> std::io::Result<()> {
     // A local process can connect without ever finishing its HTTP headers.  Do
     // not leave one task alive indefinitely for each such connection.
     let header = match tokio::time::timeout(Duration::from_secs(10), read_header(&mut socket)).await {
         Ok(Ok(header)) => header,
         _ => {
-            socket.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n").await?;
+            socket.write_all(status_response(400, "Bad Request").as_bytes()).await?;
             return Ok(());
         }
     };
+    // Range makes the playback probe a preflight. Answer it before opening a transfer.
+    if header.starts_with(b"OPTIONS ") {
+        socket
+            .write_all(format!("HTTP/1.1 204 No Content\r\n{CORS}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())
+            .await?;
+        return Ok(());
+    }
     let Some(request) = parse_request(&header) else {
-        socket.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n").await?;
+        socket.write_all(status_response(400, "Bad Request").as_bytes()).await?;
         return Ok(());
     };
     let route = bus.routes.lock().expect("routes").get(&request.token).cloned();
     let Some(route) = route else {
-        socket.write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n").await?;
+        socket.write_all(status_response(404, "Not Found").as_bytes()).await?;
         return Ok(());
     };
     let (start, end) = request.range.unwrap_or((0, None));
@@ -164,7 +177,7 @@ async fn handle(mut socket: TcpStream, bus: Arc<AudioBus>, pulls: mpsc::Unbounde
         end,
         reply: tx,
     }).is_err() {
-        socket.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n").await?;
+        socket.write_all(status_response(502, "Bad Gateway").as_bytes()).await?;
         return Ok(());
     }
 
@@ -174,13 +187,13 @@ async fn handle(mut socket: TcpStream, bus: Arc<AudioBus>, pulls: mpsc::Unbounde
         Ok(Some(piece)) if piece.error.as_deref() == Some("range") => {
             bus.finish(id);
             cancel(&pulls);
-            socket.write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nConnection: close\r\n\r\n").await?;
+            socket.write_all(status_response(416, "Range Not Satisfiable").as_bytes()).await?;
             return Ok(());
         }
         _ => {
             bus.finish(id);
             cancel(&pulls);
-            socket.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n").await?;
+            socket.write_all(status_response(502, "Bad Gateway").as_bytes()).await?;
             return Ok(());
         }
     };
@@ -188,7 +201,7 @@ async fn handle(mut socket: TcpStream, bus: Arc<AudioBus>, pulls: mpsc::Unbounde
         let Some(stop) = range_stop(start, end, total) else {
             bus.finish(id);
             cancel(&pulls);
-            socket.write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nConnection: close\r\n\r\n").await?;
+            socket.write_all(status_response(416, "Range Not Satisfiable").as_bytes()).await?;
             return Ok(());
         };
         stop
@@ -198,12 +211,12 @@ async fn handle(mut socket: TcpStream, bus: Arc<AudioBus>, pulls: mpsc::Unbounde
     let length = stop.saturating_sub(start);
     let head = if request.range.is_some() {
         format!(
-            "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {length}\r\nContent-Range: bytes {start}-{}/{total}\r\nAccept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 206 Partial Content\r\n{CORS}Content-Type: application/octet-stream\r\nContent-Length: {length}\r\nContent-Range: bytes {start}-{}/{total}\r\nAccept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
             stop.saturating_sub(1)
         )
     } else {
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {length}\r\nAccept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 200 OK\r\n{CORS}Content-Type: application/octet-stream\r\nContent-Length: {length}\r\nAccept-Ranges: bytes\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
         )
     };
     if socket.write_all(head.as_bytes()).await.is_err() || request.head_only {

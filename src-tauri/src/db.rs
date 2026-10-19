@@ -87,6 +87,7 @@ impl Db {
         };
         db.migrate()?;
         db.seed()?;
+        db.queue_missing_covers()?;
         Ok(db)
     }
 
@@ -96,6 +97,15 @@ impl Db {
         self.add_column_if_missing("peers", "trust", "TEXT NOT NULL DEFAULT 'full'")?;
         self.add_column_if_missing("notices", "read", "INTEGER NOT NULL DEFAULT 1")?;
         self.add_column_if_missing("notices", "pinned", "INTEGER NOT NULL DEFAULT 0")?;
+        // Tables and switches left behind when sync revisions, the mailbox, and the old on/off toggles were removed.
+        self.conn.execute_batch(
+            "DROP TABLE IF EXISTS mailbox_acks;
+             DROP TABLE IF EXISTS mailbox;
+             DROP TABLE IF EXISTS applied_ops;
+             DROP TABLE IF EXISTS snapshots;
+             DROP TABLE IF EXISTS feature_revisions;
+             DELETE FROM device_settings WHERE key IN ('historySyncMode', 'syncEnabled', 'audioShare', 'positionSync');",
+        )?;
         Ok(())
     }
 
@@ -154,12 +164,19 @@ impl Db {
     fn drop_queue_sync(&self) -> AppResult<()> {
         for key in ["dirty", "pendingSnapshots", "syncSources", "syncBlocks"] {
             let mut map = self.setting_json(key)?;
-            if map.as_object_mut().is_some_and(|object| object.remove("queue").is_some()) {
+            let Some(object) = map.as_object_mut() else { continue };
+            let mut changed = object.remove("queue").is_some();
+            if key == "syncBlocks" {
+                for value in object.values_mut() {
+                    if value.as_object_mut().is_some_and(|flags| flags.remove("timestamp").is_some()) {
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
                 self.set_device_setting(key, map)?;
             }
         }
-        self.conn.execute("DELETE FROM snapshots WHERE feature = 'queue'", [])?;
-        self.conn.execute("DELETE FROM feature_revisions WHERE feature = 'queue'", [])?;
         Ok(())
     }
 
@@ -359,7 +376,6 @@ impl Db {
         Ok(BlockFlags {
             manual: item.get("manual").and_then(|v| v.as_bool()).unwrap_or(false),
             source: item.get("source").and_then(|v| v.as_bool()).unwrap_or(false),
-            timestamp: item.get("timestamp").and_then(|v| v.as_bool()).unwrap_or(false),
             all: item.get("all").and_then(|v| v.as_bool()).unwrap_or(false),
         })
     }
@@ -662,6 +678,84 @@ impl Db {
         }
     }
 
+    /// Replaces liked songs. Unhashed local rows in `members` are kept. A failed write leaves the previous list.
+    pub fn replace_favorites(&self, members: &[MemberRef]) -> AppResult<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let write = (|| {
+            self.conn.execute("DELETE FROM favorites", [])?;
+            for member in members {
+                self.conn.execute(
+                    "INSERT INTO favorites(content_id, local_file_id) VALUES(?1, ?2)",
+                    params![member.content_id, member.local_file_id],
+                )?;
+            }
+            Ok(())
+        })();
+        match write {
+            Ok(()) => {
+                if let Err(error) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(error.into());
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// A cover is `{cache}/covers/{local file id}.jpg`. Anything else is extracted again into that file.
+    fn queue_missing_covers(&self) -> AppResult<()> {
+        let covers = self.cache_dir.join("covers");
+        std::fs::create_dir_all(&covers)?;
+        let ids: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT local_file_id FROM local_files WHERE video = 0 AND access_status = 'available'",
+            )?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for id in ids {
+            let dest = covers.join(format!("{id}.jpg"));
+            if dest.is_file() {
+                self.conn.execute(
+                    "UPDATE local_files SET cover_path = ?1, cover_checked = 1 WHERE local_file_id = ?2 AND cover_path IS NOT ?1",
+                    params![dest.to_string_lossy(), id],
+                )?;
+            } else {
+                self.conn.execute(
+                    "UPDATE local_files SET cover_path = NULL, cover_checked = 0 WHERE local_file_id = ?1 AND cover_checked != 0",
+                    params![id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn push_download_history(&self, content_id: &str, title: &str, path: &str, ok: bool) -> AppResult<Value> {
+        let mut list = self.setting_json("downloadHistory").unwrap_or(json!([]));
+        if !list.is_array() {
+            list = json!([]);
+        }
+        let Some(items) = list.as_array_mut() else { return Ok(json!([])) };
+        items.insert(
+            0,
+            json!({
+                "contentId": content_id,
+                "title": title,
+                "path": path,
+                "ok": ok,
+                "at": Utc::now().to_rfc3339(),
+            }),
+        );
+        items.truncate(40);
+        let saved = list.clone();
+        self.set_device_setting("downloadHistory", list)?;
+        Ok(saved)
+    }
+
     pub fn is_favorite(&self, content_id: Option<&str>, local_file_id: Option<&str>) -> AppResult<bool> {
         let count: i64 = if let Some(content_id) = content_id {
             self.conn.query_row(
@@ -876,10 +970,18 @@ impl Db {
         Ok(())
     }
 
+    /// One statement, so a queue save that lands in between cannot be overwritten by an older copy.
     pub fn save_progress(&self, position_sec: f64) -> AppResult<()> {
-        let mut state = self.player_json()?;
-        state["positionSec"] = json!(position_sec);
-        self.save_player_json(&state)
+        let changed = self.conn.execute(
+            "UPDATE player_state SET value = json_set(value, '$.positionSec', ?1) WHERE key = 'state' AND json_valid(value)",
+            params![position_sec],
+        )?;
+        if changed == 0 {
+            let mut state = self.player_json()?;
+            state["positionSec"] = json!(position_sec);
+            self.save_player_json(&state)?;
+        }
+        Ok(())
     }
 
     pub fn history_keys(&self) -> AppResult<Vec<String>> {
@@ -923,6 +1025,20 @@ impl Db {
                 Some((id, name, members))
             })
             .collect();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = self.write_playlist_snapshot(&incoming);
+        if result.is_ok() {
+            if let Err(error) = self.conn.execute_batch("COMMIT") {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                return Err(error.into());
+            }
+        } else {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        result
+    }
+
+    fn write_playlist_snapshot(&self, incoming: &[(String, String, Vec<String>)]) -> AppResult<()> {
         let keep: Vec<&str> = incoming.iter().map(|(id, _, _)| id.as_str()).collect();
         for existing in self.playlists()? {
             if !keep.contains(&existing.id.as_str()) {
@@ -1349,7 +1465,6 @@ pub struct HoldingInput {
 pub struct BlockFlags {
     pub manual: bool,
     pub source: bool,
-    pub timestamp: bool,
     pub all: bool,
 }
 
@@ -1375,7 +1490,6 @@ pub fn fts_query(query: &str) -> String {
 
 fn device_defaults() -> Vec<(&'static str, Value)> {
     vec![
-        ("showUnavailable", json!(true)),
         ("historyCap", json!(100)),
         ("historySyncMode", json!("utc")),
         ("historySync", json!(false)),
@@ -1384,7 +1498,6 @@ fn device_defaults() -> Vec<(&'static str, Value)> {
         ("incognito", json!(false)),
         ("syncSources", json!({})),
         ("dirty", json!({})),
-        ("syncBlocks", json!({})),
         ("exposeDefault", json!("hide")),
         ("positionSync", json!(false)),
         ("positionSyncDevice", json!("")),
@@ -1394,8 +1507,6 @@ fn device_defaults() -> Vec<(&'static str, Value)> {
         ("relayHost", json!("")),
         ("relayPort", json!(22067)),
         ("relayDeviceId", json!("")),
-        ("relayToken", json!("")),
-        ("discovery", json!(false)),
         ("syncEnabled", json!(true)),
         ("audioShare", json!(true)),
         ("autoSend", json!({})),
@@ -1409,6 +1520,7 @@ fn device_defaults() -> Vec<(&'static str, Value)> {
         ("overwriteMode", json!("silent")),
         ("listenPort", json!(0)),
         ("syncRequestDevice", json!("")),
+        ("downloadHistory", json!([])),
         ("noticeRead", json!("visible")),
         ("noticeClear", json!("ask")),
         ("silenced", json!({})),
@@ -1502,31 +1614,6 @@ CREATE TABLE IF NOT EXISTS playback_notes (
     reason TEXT,
     attempt_id TEXT
 );
-CREATE TABLE IF NOT EXISTS snapshots (
-    feature TEXT NOT NULL,
-    source_device_id TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    payload TEXT NOT NULL,
-    signature BLOB NOT NULL,
-    PRIMARY KEY (feature, source_device_id)
-);
-CREATE TABLE IF NOT EXISTS applied_ops (
-    op_id TEXT PRIMARY KEY,
-    applied_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS mailbox (
-    id INTEGER PRIMARY KEY,
-    sender_id TEXT NOT NULL,
-    n INTEGER NOT NULL,
-    ciphertext BLOB NOT NULL,
-    created_at INTEGER NOT NULL,
-    UNIQUE(sender_id, n)
-);
-CREATE TABLE IF NOT EXISTS mailbox_acks (
-    mailbox_id INTEGER NOT NULL,
-    device_id TEXT NOT NULL,
-    PRIMARY KEY (mailbox_id, device_id)
-);
 CREATE TABLE IF NOT EXISTS playlists (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -1588,10 +1675,6 @@ CREATE TABLE IF NOT EXISTS signal_state (
 CREATE TABLE IF NOT EXISTS player_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS feature_revisions (
-    feature TEXT PRIMARY KEY,
-    revision INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pending_content_move (
     local_file_id TEXT PRIMARY KEY,

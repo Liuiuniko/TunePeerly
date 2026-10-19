@@ -168,7 +168,7 @@ pub fn client_config(
     if let Some(protocol) = alpn {
         config.alpn_protocols = vec![protocol.to_vec()];
     } else {
-        config.alpn_protocols = vec![b"device-music".to_vec()];
+        config.alpn_protocols = vec![b"tunepeerly".to_vec()];
     }
     Ok(config)
 }
@@ -186,6 +186,6 @@ pub fn server_config(
         .map_err(|err| Error::General(err.to_string()))?
         .with_client_cert_verifier(verifier)
         .with_single_cert(vec![cert], key)?;
-    config.alpn_protocols = vec![b"device-music".to_vec()];
+    config.alpn_protocols = vec![b"tunepeerly".to_vec()];
     Ok(config)
 }

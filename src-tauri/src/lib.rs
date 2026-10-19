@@ -91,6 +91,8 @@ fn bootstrap(state: State<'_, AppState>) -> AppResult<Value> {
         "relay": live.relay,
         "offer": live.offer,
         "download": live.download,
+        "downloadQueue": live.download_queue,
+        "downloadHistory": db.setting_json("downloadHistory").unwrap_or(json!([])),
         "manual": live.manual,
         "failures": live.failures,
         "blocks": blocks,
@@ -201,6 +203,15 @@ fn record_history(state: State<'_, AppState>, content_id: Option<String>, local_
         let _ = state.net.tx.send(net::Cmd::AutoSync("history".into()));
     }
     Ok(())
+}
+
+#[tauri::command(async)]
+fn reveal_path(path: String) -> AppResult<()> {
+    let file = Path::new(&path);
+    if !file.is_file() {
+        return Err(AppError::Message("file.missing".into()));
+    }
+    tauri_plugin_opener::reveal_item_in_dir(file).map_err(|err| AppError::Message(err.to_string()))
 }
 
 #[tauri::command(async)]
@@ -614,7 +625,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data = app.path().data_dir().expect("data dir");
-            let cache = app.path().app_cache_dir().expect("cache dir");
+            let cache = config::cache_dir();
             let app_dir = config::app_dir(&data);
             let database = config::database_path(&app_dir);
             let db = Db::open(&database, app_dir.clone(), cache.clone()).expect("database");
@@ -670,6 +681,7 @@ pub fn run() {
             playlist_members,
             move_membership,
             show_in_folder,
+            reveal_path,
             desktop_update,
             desktop_state,
             desktop_command,
@@ -762,8 +774,14 @@ impl BackgroundWork {
                 }
             }
             Err(_) => {
-                if let Ok(guard) = self.db.lock() {
-                    let _ = scan::mark_unreadable(&guard, &job.local_file_id);
+                // The song currently playing may refuse a second reader. Leave it for a later pass.
+                let playing_this = playing && current == Some(job.local_file_id.as_str());
+                if !playing_this {
+                    if let Ok(guard) = self.db.lock() {
+                        let _ = scan::mark_unreadable(&guard, &job.local_file_id);
+                    }
+                } else {
+                    return false;
                 }
             }
         }

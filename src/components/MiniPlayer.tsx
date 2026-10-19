@@ -4,7 +4,7 @@ import { api, type DesktopTrack } from "../api";
 import { coverSrc } from "./Cover";
 import { Icons } from "../ui/icons";
 
-function dragOrClick(onClick: () => void) {
+function useDragOrClick(onClick: () => void) {
   const start = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   return {
     onPointerDown: (event: ReactPointerEvent) => {
@@ -53,7 +53,7 @@ export function MiniPlayer() {
   }, [track, i18n]);
 
   const command = (action: string) => void api.desktopCommand(action).catch(() => {});
-  const restore = dragOrClick(() => command("restore"));
+  const restore = useDragOrClick(() => command("restore"));
   const title = track?.title || t("player.idle");
   const cover = track?.coverPath ? coverSrc(track.coverPath) : "";
   return (

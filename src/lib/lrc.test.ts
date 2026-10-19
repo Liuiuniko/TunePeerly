@@ -17,6 +17,11 @@ test("offset tag shifts every line", () => {
   assert.equal(lyrics.lines[0].time, 1.5);
 });
 
+test("an offset after the stamps still shifts every line", () => {
+  const lyrics = parseLyrics("[00:02.00]Hi\n[00:04.00]There\n[offset:500]");
+  assert.deepEqual(lyrics.lines.map((line) => line.time), [1.5, 3.5]);
+});
+
 test("plain lyrics keep their blank lines inside but trim the edges", () => {
   const lyrics = parseLyrics("\n\nLine one\n\nLine two\n\n");
   assert.equal(lyrics.timed, false);

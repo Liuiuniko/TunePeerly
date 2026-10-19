@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
-import { useApp } from "../app/model";
+import { mirrorPosition, useApp, type PlaybackMirror } from "../app/model";
 import { Cover } from "../components/Cover";
 import { Mascot } from "../components/Mascot";
 import { tintFor } from "../lib/format";
@@ -12,7 +12,7 @@ import { Icons } from "../ui/icons";
 export function NowPlayingPage() {
   const { t } = useTranslation();
   const app = useApp();
-  const track = app.current;
+  const track = app.shown;
   const { playing } = useSyncExternalStore(transport.subscribe, transport.get);
   const failed = Boolean(track && app.failure?.key === trackKey(track));
   const lyrics = useMemo<Lyrics | null>(() => {
@@ -33,13 +33,16 @@ export function NowPlayingPage() {
     );
   }
 
-  const mood = failed ? "error" : playing ? "playing" : "paused";
+  const mirror = app.following ? app.mirror : null;
+  const live = mirror ? mirror.playing : playing;
+  const followedName = mirror ? app.boot?.links.find((link) => link.deviceId === mirror.deviceId)?.name ?? "" : "";
+  const mood = failed ? "error" : live ? "playing" : "paused";
   const tint = tintFor(track.album || track.title);
   return (
     <div className="page now-page" style={{ ["--tint" as string]: tint }}>
       <div className="now-art">
         <div className="now-cover-wrap">
-          <Cover src={track.coverUrl} className={`now-cover${playing ? " spinning-glow" : ""}`} />
+          <Cover src={track.coverUrl} className={`now-cover${live ? " spinning-glow" : ""}`} />
         </div>
         <div className="now-meta">
           <div className="now-title-row">
@@ -70,7 +73,7 @@ export function NowPlayingPage() {
           <div className="now-foot">
             <div className="now-badges">
               <span className={`badge ${track.badge}`}>{t(`badge.${track.badge}`)}</span>
-              {app.engine.remoteDevice && <span className="badge remote">{t("now.from", { name: app.boot?.links.find((link) => link.deviceId === app.engine.remoteDevice)?.name ?? "" })}</span>}
+              {mirror ? <span className="badge remote">{t("now.from", { name: followedName })}</span> : app.engine.remoteDevice && <span className="badge remote">{t("now.from", { name: app.boot?.links.find((link) => link.deviceId === app.engine.remoteDevice)?.name ?? "" })}</span>}
               {failed && app.failure && <span className="badge error">{t(app.failure.reason, { defaultValue: t("notice.playbackFailed") })}</span>}
             </div>
             <div className="now-mascot">
@@ -79,19 +82,26 @@ export function NowPlayingPage() {
           </div>
         </div>
       </div>
-      <LyricsPanel key={trackKey(track)} lyrics={lyrics} hasLocal={Boolean(track.localFileId)} />
+      <LyricsPanel key={trackKey(track)} lyrics={lyrics} hasLocal={Boolean(track.localFileId)} seekable={!mirror} mirror={mirror} />
     </div>
   );
 }
 
-function LyricsPanel({ lyrics, hasLocal }: { lyrics: Lyrics | null; hasLocal: boolean }) {
+function LyricsPanel({ lyrics, hasLocal, seekable, mirror }: { lyrics: Lyrics | null; hasLocal: boolean; seekable: boolean; mirror: PlaybackMirror | null }) {
   const { t } = useTranslation();
   const app = useApp();
   const box = useRef<HTMLDivElement>(null);
   const userScroll = useRef(0);
   const lines = lyrics?.timed ? lyrics.lines : null;
-  const getActive = useCallback(() => (lines ? activeLine(lines, clock.get().position) : -1), [lines]);
-  const active = useSyncExternalStore(clock.subscribe, getActive);
+  const [now, setNow] = useState(() => performance.now());
+  useEffect(() => {
+    if (!mirror?.playing) return;
+    const timer = window.setInterval(() => setNow(performance.now()), 200);
+    return () => window.clearInterval(timer);
+  }, [mirror?.playing, mirror?.at]);
+  const getActive = useCallback(() => (lines && !mirror ? activeLine(lines, clock.get().position) : -1), [lines, mirror]);
+  const clockActive = useSyncExternalStore(clock.subscribe, getActive);
+  const active = mirror && lines ? activeLine(lines, mirrorPosition(mirror, now)) : clockActive;
 
   useEffect(() => {
     if (active < 0 || !box.current || Date.now() - userScroll.current < 4000) return;
@@ -131,6 +141,7 @@ function LyricsPanel({ lyrics, hasLocal }: { lyrics: Lyrics | null; hasLocal: bo
             data-line={at}
             className={`lyric-line${at === active ? " active" : at < active ? " past" : ""}`}
             onClick={() => {
+              if (!seekable) return;
               userScroll.current = 0;
               app.engine.seek(line.time);
             }}

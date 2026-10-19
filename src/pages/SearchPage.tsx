@@ -104,7 +104,7 @@ export function SearchPage({ scope: initialScope }: { scope?: string }) {
                   </button>
                 )}
               </div>
-              <TrackTable tracks={showAll ? results : results.slice(0, 5)} contextId="search" columns={{ folder: false, added: false, source: true }} />
+              <TrackTable tracks={showAll ? results : results.slice(0, 5)} playTracks={results} contextId="search" columns={{ folder: false, added: false, source: true }} />
             </section>
           </div>
         </>

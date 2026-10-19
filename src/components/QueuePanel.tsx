@@ -144,6 +144,8 @@ function useContextLabel(contextId: string): string {
       return t("nav.allMusic");
     case "search":
       return t("nav.search");
+    case "added":
+      return t("home.added");
     default:
       return t("nav.allMusic");
   }

@@ -45,7 +45,7 @@ pub fn library(db: &Db, online: &[String]) -> AppResult<Value> {
             by_content.entry(content_id.clone()).or_default().push(row);
         } else {
             let badge = if row.access_status == "available" { "local" } else { "unavailable" };
-            tracks.push(stub_from_local(row, &[], badge));
+            tracks.push(stub_from_local(db, row, &[], badge));
         }
     }
     for (content_id, rows) in &by_content {
@@ -64,14 +64,15 @@ pub fn library(db: &Db, online: &[String]) -> AppResult<Value> {
             "unavailable"
         };
         let source = readable.copied().unwrap_or(rows[0]);
-        let mut stub = stub_from_local(source, &holders, badge);
+        let mut stub = stub_from_local(db, source, &holders, badge);
         if stub.cover_url.is_none() {
             stub.cover_url = remote_covers.get(content_id).cloned();
         }
         // A readable local copy is always retried, even after a confirmed decode failure.
         stub.playable = (badge == "local" && !source.video && source.access_status == "available")
             || (badge == "remote" && !unplayable);
-        stub.dimmed = badge == "unavailable" || source.access_status != "available";
+        // A missing local file can still play from a paired device, so only an unplayable row is dimmed.
+        stub.dimmed = badge == "unavailable";
         if source.video {
             stub.reason_key = Some("playback.video".into());
             stub.playable = false;
@@ -138,7 +139,7 @@ fn order_position(track: &TrackStub, positions: &HashMap<String, i64>) -> Option
         .or_else(|| track.local_file_id.as_ref().and_then(|id| positions.get(id).copied()))
 }
 
-fn stub_from_local(row: &LocalRow, holders: &[String], badge: &str) -> TrackStub {
+fn stub_from_local(db: &Db, row: &LocalRow, holders: &[String], badge: &str) -> TrackStub {
     let reason = if row.video {
         Some("playback.video".into())
     } else if row.access_status == "missing" {
@@ -169,11 +170,27 @@ fn stub_from_local(row: &LocalRow, holders: &[String], badge: &str) -> TrackStub
         playback_status: row.playback_status.clone(),
         reason_key: reason,
         video: row.video,
-        cover_url: row.cover_path.clone(),
+        cover_url: cover_in_cache(db, &row.local_file_id, row.cover_path.as_deref()),
         absolute_path: Some(row.absolute_path.clone()),
         holder_ids: holders.to_vec(),
         playable: badge == "local" && !row.video && row.access_status == "available",
         dimmed: badge == "unavailable" || row.access_status != "available",
+    }
+}
+
+/// Only a file already in this install's cover cache is shown. Other stored paths are ignored.
+fn cover_in_cache(db: &Db, local_file_id: &str, stored: Option<&str>) -> Option<String> {
+    let dest = db.cache_dir.join("covers").join(format!("{local_file_id}.jpg"));
+    if dest.is_file() {
+        return Some(dest.to_string_lossy().into_owned());
+    }
+    let stored = stored?;
+    let path = std::path::Path::new(stored);
+    let covers = db.cache_dir.join("covers");
+    if path.is_file() && path.starts_with(&covers) {
+        Some(stored.to_string())
+    } else {
+        None
     }
 }
 
@@ -351,11 +368,6 @@ pub fn search(db: &Db, query: &str, online: &[String]) -> AppResult<Value> {
     Ok(json!(out))
 }
 
-#[allow(dead_code)]
-pub fn cover_file(path: &str) -> Option<String> {
-    Some(path.to_string())
-}
-
 /// Cover pictures of exposed, readable local copies of this content.
 pub fn cover_paths(db: &Db, content_id: &str) -> AppResult<Vec<(String, String)>> {
     let mut stmt = db.conn.prepare(
@@ -401,12 +413,14 @@ pub fn save_remote_cover(db: &Db, content_id: &str, path: Option<&str>) -> AppRe
 }
 
 fn load_remote_covers(db: &Db) -> AppResult<HashMap<String, String>> {
+    let covers = db.cache_dir.join("covers");
     let mut stmt = db.conn.prepare("SELECT content_id, path FROM remote_covers WHERE path IS NOT NULL")?;
     let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
     let mut map = HashMap::new();
     for row in rows {
         let (id, path) = row?;
-        if std::path::Path::new(&path).exists() {
+        let file = std::path::Path::new(&path);
+        if file.is_file() && file.starts_with(&covers) {
             map.insert(id, path);
         }
     }

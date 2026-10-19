@@ -699,6 +699,139 @@ body.resizing * {
   gap: 8px;
 }
 
+.download-anchor {
+  position: relative;
+}
+
+.download-btn {
+  position: relative;
+}
+
+.download-ring {
+  position: absolute;
+  inset: -2px;
+  width: calc(100% + 4px);
+  height: calc(100% + 4px);
+  transform: rotate(-90deg);
+  pointer-events: none;
+}
+
+.download-ring.unknown {
+  animation: spin 1s linear infinite;
+}
+
+.ring-track,
+.ring-bar {
+  fill: none;
+  stroke-width: 2.4;
+}
+
+.ring-track {
+  stroke: var(--line);
+}
+
+.ring-bar {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-dasharray: 94.2;
+  stroke-dashoffset: 94.2;
+}
+
+.download-ring.unknown .ring-bar {
+  stroke-dasharray: 22 72;
+  stroke-dashoffset: 0;
+}
+
+.download-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.download-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(360px, 70vw);
+  max-height: min(440px, 70vh);
+  overflow: auto;
+  padding: 12px;
+  border-radius: var(--r-md);
+  background: var(--card);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  z-index: 450;
+}
+
+.download-pop h3,
+.download-pop h4 {
+  margin: 0;
+}
+
+.download-pop h3 {
+  font-size: 14px;
+}
+
+.download-pop h4 {
+  margin: 12px 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.download-pop section:first-of-type h4 {
+  margin-top: 10px;
+}
+
+.download-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.download-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.download-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-meter {
+  height: 4px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.download-meter span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.download-pct {
+  width: 40px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .search-box {
   flex: 1 1 180px;
   min-width: 0;
@@ -3564,7 +3697,7 @@ body.resizing * {
   padding: 8px 10px;
 }
 
-.sync-head span:nth-child(n + 3):nth-child(-n + 6) {
+.sync-head span:nth-child(n + 3):nth-child(-n + 5) {
   text-align: center;
   cursor: help;
 }
@@ -4554,6 +4687,7 @@ button.device-name:hover {
   gap: 6px;
   padding: 6px 8px;
   background: var(--card);
+  color: var(--text);
   cursor: grab;
 }
 
@@ -4612,6 +4746,7 @@ button.device-name:hover {
 }
 
 .mini-title {
+  color: var(--text);
   font-weight: 700;
   font-size: 13px;
   transition: color 0.12s;

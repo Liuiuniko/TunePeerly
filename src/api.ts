@@ -41,16 +41,25 @@ export type OverwriteAsk = { id: number; deviceId: string; name: string; feature
 export type Offer = { deviceId: string; name: string; safetyNumber: string; role?: "incoming" | "outgoing" };
 export type BlockedDevice = { deviceId: string; name: string; blockedAt: string };
 export type Notice = { id: number; at: string; kind: string; deviceId: string; name: string; detail: string; read?: boolean; pinned?: boolean };
-export type Download = { contentId: string; state: "started" | "saved" | "failed" | "need-folder" | "busy"; detail: string };
+export type Download = {
+  contentId: string;
+  state: "started" | "saved" | "failed" | "need-folder" | "busy";
+  detail: string;
+  title?: string;
+  received?: number;
+  total?: number;
+};
+export type DownloadQueueItem = { contentId: string; title: string };
+export type DownloadHistoryItem = { contentId: string; title: string; path: string; ok: boolean; at: string };
+export type DownloadFeed = { current: Download | null; queue: DownloadQueueItem[]; history: DownloadHistoryItem[] };
 export type Pending = { feature: Feature; source: string | null };
 export type Feature = "favorites" | "appearance" | "playlists" | "history";
-export type BlockFlags = { manual?: boolean; source?: boolean; timestamp?: boolean; all?: boolean };
+export type BlockFlags = { manual?: boolean; source?: boolean; all?: boolean };
 
 export type Settings = {
   showUnavailable?: boolean;
   historyCap?: number;
   overwriteMode?: "silent" | "ask";
-  historySyncMode?: "utc" | "overwrite" | "follow";
   historySync?: boolean;
   historyStartup?: boolean;
   historyPaused?: boolean;
@@ -58,7 +67,6 @@ export type Settings = {
   syncSources?: Partial<Record<Feature, string>>;
   syncBlocks?: Partial<Record<Feature | "global", BlockFlags>>;
   exposeDefault?: "expose" | "hide";
-  positionSync?: boolean;
   positionSyncDevice?: string;
   downloadFolder?: string;
   volume?: number;
@@ -67,8 +75,6 @@ export type Settings = {
   relayDeviceId?: string;
   relayToken?: string;
   discovery?: boolean;
-  syncEnabled?: boolean;
-  audioShare?: boolean;
   autoSend?: Partial<Record<Feature, boolean>>;
   syncRequestDevice?: string;
   displayName?: string;
@@ -104,6 +110,8 @@ export type Bootstrap = {
   relay: string;
   offer: Offer | null;
   download: Download | null;
+  downloadQueue?: DownloadQueueItem[];
+  downloadHistory?: DownloadHistoryItem[];
   manual: string | null;
   failures?: Record<string, string>;
   blocks?: BlockedDevice[];
@@ -162,6 +170,7 @@ export const api = {
   remoteUrl: (contentId: string, exclude: string[]) => invoke<{ url: string; deviceId: string }>("remote_url", { contentId, exclude }),
   moveMembership: (previous: string, next: string, accept: boolean) => invoke("move_membership", { previous, next, accept }),
   showInFolder: (localFileId: string) => invoke("show_in_folder", { localFileId }),
+  revealPath: (path: string) => invoke("reveal_path", { path }),
   desktopUpdate: (track: DesktopTrack) => invoke("desktop_update", { track }),
   desktopState: () => invoke<DesktopTrack>("desktop_state"),
   desktopCommand: (action: string) => invoke("desktop_command", { action }),

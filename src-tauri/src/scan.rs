@@ -58,6 +58,8 @@ struct Prepared {
     mtime_ms: i64,
     size: i64,
     tags: Option<TagRead>,
+    /// The directory entry exists, but its size and time could not be read.
+    unreadable: bool,
 }
 
 /// Walks a grant and reads tags without holding the database, then writes the batch in one transaction.
@@ -90,28 +92,34 @@ pub fn import_path(db: &Arc<Mutex<Db>>, path: &Path, kind: &str) -> AppResult<Im
     let prepared = prepare_files(path, root_is_dir, &files, &existing);
 
     let guard = db.lock().expect("db");
-    guard.conn.execute_batch("BEGIN")?;
-    let written = write_prepared(&guard, grant_id, &prepared, &existing);
-    match written {
-        Ok((added, updated)) => {
-            let seen: HashSet<&str> = prepared.iter().map(|item| item.relative.as_str()).collect();
-            let mut missing = 0;
-            for (relative, row) in &existing {
-                if !seen.contains(relative.as_str()) {
-                    guard.conn.execute(
-                        "UPDATE local_files SET access_status = 'missing', access_reason = 'file.missing'
-                         WHERE local_file_id = ?1",
-                        params![row.local_file_id],
-                    )?;
-                    missing += 1;
-                }
+    guard.conn.execute_batch("BEGIN IMMEDIATE")?;
+    let written = (|| {
+        let (added, updated) = write_prepared(&guard, grant_id, &prepared, &existing)?;
+        let seen: HashSet<&str> = prepared.iter().map(|item| item.relative.as_str()).collect();
+        let mut missing = 0;
+        for (relative, row) in &existing {
+            if !seen.contains(relative.as_str()) {
+                guard.conn.execute(
+                    "UPDATE local_files SET access_status = 'missing', access_reason = 'file.missing'
+                     WHERE local_file_id = ?1",
+                    params![row.local_file_id],
+                )?;
+                missing += 1;
             }
-            guard.conn.execute_batch("COMMIT")?;
-            Ok(ImportSummary { kind: kind.into(), path: path_text, grant_id, added, updated, missing })
         }
-        Err(err) => {
+        Ok(ImportSummary { kind: kind.into(), path: path_text, grant_id, added, updated, missing })
+    })();
+    match written {
+        Ok(summary) => match guard.conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(summary),
+            Err(error) => {
+                let _ = guard.conn.execute_batch("ROLLBACK");
+                Err(error.into())
+            }
+        },
+        Err(error) => {
             let _ = guard.conn.execute_batch("ROLLBACK");
-            Err(err)
+            Err(error)
         }
     }
 }
@@ -170,14 +178,6 @@ fn prepare_one(
     file: &Path,
     existing: &HashMap<String, ExistingRow>,
 ) -> Option<Prepared> {
-    let meta = fs::metadata(file).ok()?;
-    let mtime_ms = meta
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|time| time.as_millis() as i64)
-        .unwrap_or(0);
-    let size = meta.len() as i64;
     let relative = if root_is_dir {
         file.strip_prefix(root).unwrap_or(file).to_string_lossy().to_string()
     } else {
@@ -185,6 +185,29 @@ fn prepare_one(
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| file.to_string_lossy().to_string())
     };
+    // A sharing violation is not "the file is gone". Dropping it here would make
+    // the import mark a song that is still on disk as missing.
+    let meta = match fs::metadata(file) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => {
+            return Some(Prepared {
+                relative,
+                absolute: file.to_path_buf(),
+                mtime_ms: 0,
+                size: 0,
+                tags: None,
+                unreadable: true,
+            });
+        }
+    };
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|time| time.as_millis() as i64)
+        .unwrap_or(0);
+    let size = meta.len() as i64;
     let unchanged = existing
         .get(&relative)
         .is_some_and(|row| row.mtime_ms == Some(mtime_ms) && row.size_bytes == Some(size));
@@ -194,6 +217,7 @@ fn prepare_one(
         mtime_ms,
         size,
         tags: if unchanged { None } else { Some(read_tags(file)) },
+        unreadable: false,
     })
 }
 
@@ -208,6 +232,16 @@ fn write_prepared(
     let new_exposed = if db.exposure_for_new_folder_file(grant_id)? { 1 } else { 0 };
     for item in prepared {
         let previous = existing.get(&item.relative);
+        if item.unreadable {
+            if let Some(row) = previous {
+                db.conn.execute(
+                    "UPDATE local_files SET absolute_path = ?1, access_status = 'unreadable', access_reason = 'file.unreadable'
+                     WHERE local_file_id = ?2",
+                    params![item.absolute.to_string_lossy(), row.local_file_id],
+                )?;
+            }
+            continue;
+        }
         let Some(read) = &item.tags else {
             if let Some(row) = previous {
                 db.conn.execute(
@@ -303,19 +337,23 @@ fn write_prepared(
 }
 
 fn collect_audio(dir: &Path, out: &mut Vec<PathBuf>) {
-    // `Path::is_dir` follows links.  Recursing that way can walk a junction
-    // back to an ancestor forever (and could pull unrelated files into a
-    // granted folder), so walk only real directories iteratively.
+    // Directory junctions and symlinks can point at an ancestor. Following them
+    // walks the same tree forever, so each real directory is entered once.
     let mut pending = vec![dir.to_path_buf()];
+    let mut seen = HashSet::new();
     while let Some(next) = pending.pop() {
-        let Ok(entries) = fs::read_dir(next) else {
+        let key = fs::canonicalize(&next).unwrap_or_else(|_| next.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&next) else {
             continue;
         };
         for entry in entries.flatten() {
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if file_type.is_dir() {
+            if file_type.is_dir() && !file_type.is_symlink() {
                 pending.push(entry.path());
             } else if file_type.is_file() {
                 let path = entry.path();
@@ -330,7 +368,7 @@ fn collect_audio(dir: &Path, out: &mut Vec<PathBuf>) {
 fn is_download_temp(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.starts_with(".device-music-download-") || name.ends_with(".part"))
+        .map(|name| name.starts_with(".tunepeerly-download-") || name.ends_with(".part"))
         .unwrap_or(false)
 }
 
@@ -723,12 +761,12 @@ pub fn refresh_access(db: &Db) -> AppResult<()> {
         rows.collect::<Result<Vec<_>, _>>()?
     };
     for (id, path) in files {
-        let status = if Path::new(&path).exists() {
-            "available"
-        } else {
-            "missing"
+        // `Path::exists` is false both when a file is gone and when it cannot be checked.
+        let (status, reason) = match fs::metadata(&path) {
+            Ok(_) => ("available", None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ("missing", Some("file.missing")),
+            Err(_) => ("unreadable", Some("file.unreadable")),
         };
-        let reason = if status == "missing" { Some("file.missing") } else { None };
         db.conn.execute(
             "UPDATE local_files SET access_status = ?1, access_reason = ?2
              WHERE local_file_id = ?3 AND (access_status != ?1 OR access_status IS NULL)",

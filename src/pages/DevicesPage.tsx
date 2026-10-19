@@ -5,6 +5,11 @@ import { useApp } from "../app/model";
 import { CommitInput, Row, Select } from "../components/controls";
 import { Icons } from "../ui/icons";
 
+function ipv4(text: string): boolean {
+  const parts = text.trim().split(".");
+  return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+
 export function relayLabel(relay: string, t: (key: string, options?: Record<string, unknown>) => string): { text: string; tone: string } {
   if (!relay) return { text: t("relay.off"), tone: "offline" };
   if (relay === "registered") return { text: t("relay.registered"), tone: "online" };
@@ -26,7 +31,7 @@ export function DevicesPage() {
   const pairedIds = new Set(boot.links.map((link) => link.deviceId));
   const nearby = boot.nearby.filter((item) => !pairedIds.has(item.deviceId) || boot.links.find((link) => link.deviceId === item.deviceId)?.state !== "online");
   const relay = relayLabel(boot.relay, t);
-  const validHost = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(host.trim());
+  const validHost = ipv4(host);
   const portNumber = Number(port);
   const validPort = Number.isInteger(portNumber) && portNumber > 0 && portNumber < 65536;
 

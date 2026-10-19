@@ -88,22 +88,22 @@ function Shell() {
         const model = latest.current;
         switch (event.payload.action) {
           case "toggle":
-            model.toggle();
+            if (!model.following) model.toggle();
             break;
           case "play":
-            if (!transport.get().playing) model.toggle();
+            if (!model.following && !transport.get().playing) model.toggle();
             break;
           case "pause":
-            model.engine.pause();
+            if (!model.following) model.engine.pause();
             break;
           case "next":
-            model.next();
+            if (!model.following) model.next();
             break;
           case "previous":
-            model.previous();
+            if (!model.following) model.previous();
             break;
           case "like":
-            if (model.current) void model.like(model.current);
+            if (model.shown) void model.like(model.shown);
             break;
           default:
             break;

@@ -1,6 +1,6 @@
-import { useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { useApp } from "../app/model";
+import { mirrorPosition, useApp } from "../app/model";
 import { Card, Shelf } from "../components/Card";
 import { Cover, LikedCover } from "../components/Cover";
 import { SyncButton } from "../components/SyncButton";
@@ -17,8 +17,13 @@ export function HomePage() {
   if (app.boot && app.tracks.length === 0) return <EmptyLibrary />;
 
   const playlists = app.boot?.playlists ?? [];
+  const added = app.library.slice().sort((a, b) => b.addedAt.localeCompare(a.addedAt));
   const recent = app.recent.slice(0, 12);
-  const recentlyAdded = app.library.slice().sort((a, b) => b.addedAt.localeCompare(a.addedAt)).slice(0, 12);
+  const recentlyAdded = added.slice(0, 12);
+  const playFrom = (list: typeof added, track: (typeof added)[number], contextId: string) => {
+    const at = list.findIndex((item) => trackKey(item) === trackKey(track));
+    if (at >= 0) app.playList(list, at, contextId);
+  };
 
   return (
     <div className="page home-page">
@@ -41,18 +46,18 @@ export function HomePage() {
         })}
       </div>
 
-      {app.current && <ContinueCard />}
+      {app.shown && <ContinueCard />}
 
       {recent.length > 0 && (
         <Shelf title={t("home.recent")} rail action={<button type="button" className="link-btn" onClick={() => app.navigate({ name: "recent" })}>{t("common.showAll")}</button>}>
-          {recent.map((track, at) => (
+          {recent.map((track) => (
             <Card
               key={trackKey(track)}
               cover={<Cover src={track.coverUrl} />}
               title={displayTitle(track, t("library.untitled"))}
               subtitle={track.artist || t("library.unknownArtist")}
-              onOpen={() => app.playList(recent, at, "recent")}
-              onPlay={() => app.playList(recent, at, "recent")}
+              onOpen={() => playFrom(app.recent, track, "recent")}
+              onPlay={() => playFrom(app.recent, track, "recent")}
             />
           ))}
         </Shelf>
@@ -60,14 +65,14 @@ export function HomePage() {
 
       {recentlyAdded.length > 0 && (
         <Shelf title={t("home.added")} rail action={<button type="button" className="link-btn" onClick={() => app.navigate({ name: "library" })}>{t("common.showAll")}</button>}>
-          {recentlyAdded.map((track, at) => (
+          {recentlyAdded.map((track) => (
             <Card
               key={trackKey(track)}
               cover={<Cover src={track.coverUrl} />}
               title={displayTitle(track, t("library.untitled"))}
               subtitle={track.artist || t("library.unknownArtist")}
-              onOpen={() => app.playList(recentlyAdded, at, "library")}
-              onPlay={() => app.playList(recentlyAdded, at, "library")}
+              onOpen={() => playFrom(added, track, "added")}
+              onPlay={() => playFrom(added, track, "added")}
             />
           ))}
         </Shelf>
@@ -130,15 +135,25 @@ function ContinueCard() {
   const app = useApp();
   const time = useSyncExternalStore(clock.subscribe, clock.get);
   const { playing } = useSyncExternalStore(transport.subscribe, transport.get);
-  const track = app.current;
+  const track = app.shown;
+  const mirror = app.following ? app.mirror : null;
+  const [now, setNow] = useState(() => performance.now());
+  useEffect(() => {
+    if (!mirror?.playing) return;
+    const timer = window.setInterval(() => setNow(performance.now()), 200);
+    return () => window.clearInterval(timer);
+  }, [mirror?.playing, mirror?.at]);
   if (!track) return null;
-  const duration = time.duration || (track.durationMs ?? 0) / 1000;
-  const progress = duration > 0 ? Math.min(100, (time.position / duration) * 100) : 0;
+  const followed = mirror ? mirrorPosition(mirror, now) : null;
+  const duration = mirror ? (mirror.duration > 0 ? mirror.duration : (track.durationMs ?? 0) / 1000) : time.duration || (track.durationMs ?? 0) / 1000;
+  const position = followed ?? time.position;
+  const live = mirror ? mirror.playing : playing;
+  const progress = duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
   return (
     <section className="continue-card">
       <Cover src={track.coverUrl} className="continue-cover" />
       <div className="continue-text">
-        <div className="hero-kind">{playing ? t("home.nowPlaying") : t("home.continue")}</div>
+        <div className="hero-kind">{live ? t("home.nowPlaying") : t("home.continue")}</div>
         <button type="button" className="continue-title" onClick={() => app.navigate({ name: "now" })}>
           {displayTitle(track, t("library.untitled"))}
         </button>
@@ -148,12 +163,12 @@ function ContinueCard() {
             <span style={{ width: `${progress}%` }} />
           </div>
           <span className="mono">
-            {clockText(time.position)} / {clockText(duration)}
+            {clockText(position)} / {clockText(duration)}
           </span>
         </div>
       </div>
-      <button type="button" className="play-fab" aria-label={playing ? t("player.pause") : t("player.play")} onClick={app.toggle}>
-        {playing ? <Icons.pause /> : <Icons.play />}
+      <button type="button" className="play-fab" aria-label={live && !mirror ? t("player.pause") : t("player.play")} onClick={() => { if (!mirror) app.toggle(); }}>
+        {live && !mirror ? <Icons.pause /> : <Icons.play />}
       </button>
     </section>
   );

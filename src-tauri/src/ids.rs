@@ -11,36 +11,6 @@ pub fn app_device_id(identity_public: &[u8]) -> String {
     hex_encode(identity_public)
 }
 
-/// DNS-SD instance names are one label, and each label must be shorter than 64 bytes.
-/// The advertisement still carries the full device id in a TXT record.
-#[cfg(test)]
-pub fn mdns_instance(device_id: &str) -> String {
-    let clean = dns_chars(device_id);
-    let label = if clean.len() > 32 { &clean[..32] } else { clean.as_str() };
-    if label.is_empty() { "device".into() } else { label.to_string() }
-}
-
-#[cfg(test)]
-pub fn mdns_host(device_id: &str) -> String {
-    let clean = dns_chars(device_id);
-    if clean.is_empty() {
-        return "device.local.".into();
-    }
-    let mut parts = Vec::new();
-    let mut rest = clean.as_str();
-    while !rest.is_empty() {
-        let end = 32.min(rest.len());
-        parts.push(&rest[..end]);
-        rest = &rest[end..];
-    }
-    format!("{}.local.", parts.join("."))
-}
-
-#[cfg(test)]
-fn dns_chars(text: &str) -> String {
-    text.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect()
-}
-
 pub fn identity_bytes_from_app_id(id: &str) -> Option<Vec<u8>> {
     hex_decode(id)
 }
@@ -208,26 +178,13 @@ mod tests {
 
     #[test]
     fn cert_id_roundtrip_ignores_case_and_dashes() {
-        let display = cert_id_display(b"device-music-cert");
+        let display = cert_id_display(b"tunepeerly-cert");
         let parsed = parse_cert_id(&display).expect("parse");
-        assert_eq!(parsed, cert_id_bytes(b"device-music-cert"));
+        assert_eq!(parsed, cert_id_bytes(b"tunepeerly-cert"));
         let messy = display.to_lowercase().replace('-', " ");
         assert_eq!(parse_cert_id(&messy), Some(parsed));
-        assert!(same_cert_id(&display, b"device-music-cert"));
+        assert!(same_cert_id(&display, b"tunepeerly-cert"));
         assert!(!same_cert_id(&display, b"other"));
-    }
-
-    #[test]
-    fn mdns_names_fit_in_a_dns_label() {
-        let id = "ab".repeat(33);
-        let instance = mdns_instance(&id);
-        assert!(instance.len() < 64);
-        assert!(!instance.contains('.'));
-        let host = mdns_host(&id);
-        assert!(host.ends_with(".local."));
-        for label in host.trim_end_matches('.').split('.') {
-            assert!(label.len() < 64);
-        }
     }
 
     #[test]
@@ -239,11 +196,15 @@ mod tests {
     }
 
     #[test]
-    fn luhn_check_digit_matches_syncthing() {
-        // "ABCDEFG" -> factor alternates, remainder algorithm from luhn.go.
-        assert_eq!(luhn32(b"ABCDEFGHIJKLM"), luhn32(b"ABCDEFGHIJKLM"));
+    fn luhn_check_digit_rejects_a_changed_character() {
         let display = cert_id_display(&[7u8; 32]);
         assert_eq!(display.chars().filter(|c| *c == '-').count(), 7);
+        assert!(parse_cert_id(&display).is_some());
+        let mut chars: Vec<char> = display.chars().collect();
+        let index = chars.iter().rposition(|c| *c != '-').expect("check digit");
+        chars[index] = if chars[index] == 'A' { 'B' } else { 'A' };
+        let tampered: String = chars.into_iter().collect();
+        assert!(parse_cert_id(&tampered).is_none());
         assert!(parse_cert_id("not-a-device").is_none());
     }
 }

@@ -293,15 +293,6 @@ function DownloadWatcher() {
     const track = app.index.get({ contentId: download.contentId });
     const title = track?.title || t("library.untitled");
     switch (download.state) {
-      case "started":
-        app.toast(t("download.started", { title }));
-        break;
-      case "saved":
-        app.toast(t("download.saved", { title }));
-        break;
-      case "busy":
-        app.toast(t("download.busy"));
-        break;
       case "failed":
         app.setNotice(download.detail ? t(download.detail, { defaultValue: t("download.failed", { title }) }) : t("download.failed", { title }));
         break;

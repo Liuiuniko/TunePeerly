@@ -353,14 +353,16 @@ export class PlaybackEngine {
   private async handleError(generation: number, track: Track, source: Source): Promise<void> {
     if (generation !== this.generation) return;
     const code = this.audio.error?.code ?? 0;
-    if (code === 1) return;
+    if (code === MediaError.MEDIA_ERR_ABORTED) return;
     const position = this.audio.currentTime || this.pendingSeek;
     const wasPlaying = this.wantPlay;
     const status = await probe(source.url);
     if (generation !== this.generation) return;
+    const delivered = status === 200 || status === 206;
+    const formatError = code === MediaError.MEDIA_ERR_DECODE || code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED;
 
     if (!source.remote) {
-      const missing = status === 404 || status === 403 || status === 0;
+      const missing = status === 404 || status === 403;
       if (missing && track.contentId && track.holderIds.length > 0) {
         this.skipLocal = true;
         this.generation += 1;
@@ -368,28 +370,33 @@ export class PlaybackEngine {
         return;
       }
       if (status === 404) return this.fail(track, { reason: "file.missing", kind: "missing" });
-      if (missing || code === MediaError.MEDIA_ERR_NETWORK) return this.fail(track, { reason: "file.unreadable", kind: "missing" });
-      if (code === MediaError.MEDIA_ERR_DECODE) return this.fail(track, { reason: "playback.decodeFailed", kind: "decode" });
+      // A decoder rejection is about these bytes. Status 0 only means the probe could not see the file URL.
+      if (formatError) return this.fail(track, formatFailure(code));
+      if (status === 0 && track.contentId && track.holderIds.length > 0) {
+        this.skipLocal = true;
+        this.generation += 1;
+        await this.attach(this.generation, position, wasPlaying);
+        return;
+      }
+      if (missing || status === 0 || code === MediaError.MEDIA_ERR_NETWORK) return this.fail(track, { reason: "file.unreadable", kind: "missing" });
       return this.fail(track, { reason: "playback.unsupported", kind: "unsupported" });
     }
 
-    const reachable = status === 200 || status === 206;
-    if (reachable && code === MediaError.MEDIA_ERR_NETWORK && this.reloads < 2) {
+    // The same content id is the same bytes. Once they actually arrived, another device will not decode them either.
+    if (formatError && delivered) {
+      const failure = formatFailure(code);
+      if (track.contentId && source.deviceId) void api.remoteFailure(track.contentId, source.deviceId, failure.kind, failure.reason).catch(() => {});
+      return this.fail(track, failure);
+    }
+    if (delivered && code === MediaError.MEDIA_ERR_NETWORK && this.reloads < 2) {
       // The route on 127.0.0.1 stays the same; the backend continues on whichever session reaches that device now.
       this.reloads += 1;
       await this.attach(generation, position, wasPlaying);
       return;
     }
-    if (!reachable || code === MediaError.MEDIA_ERR_NETWORK) {
-      if (source.deviceId) this.failedDevices.push(source.deviceId);
-      this.generation += 1;
-      await this.attach(this.generation, position, wasPlaying);
-      return;
-    }
-    const kind = code === MediaError.MEDIA_ERR_DECODE ? "decode" : "unsupported";
-    const reason = kind === "decode" ? "playback.decodeFailed" : "playback.unsupported";
-    if (track.contentId && source.deviceId) void api.remoteFailure(track.contentId, source.deviceId, kind, reason).catch(() => {});
-    this.fail(track, { reason, kind });
+    if (source.deviceId) this.failedDevices.push(source.deviceId);
+    this.generation += 1;
+    await this.attach(this.generation, position, wasPlaying);
   }
 
   private fail(track: Track, failure: Failure): void {
@@ -404,6 +411,12 @@ export class PlaybackEngine {
 function sameMedia(left: Track, right: Track): boolean {
   if (left.contentId && right.contentId) return left.contentId === right.contentId;
   return Boolean(left.localFileId) && left.localFileId === right.localFileId;
+}
+
+function formatFailure(code: number): Failure {
+  const kind = code === MediaError.MEDIA_ERR_DECODE ? "decode" : "unsupported";
+  const reason = kind === "decode" ? "playback.decodeFailed" : "playback.unsupported";
+  return { reason, kind };
 }
 
 function failureKind(reason: string): FailureKind {

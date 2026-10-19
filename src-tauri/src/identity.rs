@@ -34,17 +34,27 @@ pub struct IdentityMaterial {
     pub distribution_id: Uuid,
 }
 
+pub const TLS_DNS_NAME: &str = "tunepeerly.local";
+
 pub fn load_or_create(db: &Db) -> AppResult<IdentityMaterial> {
     if let Some(bytes) = db.signal_blob("identity")? {
         let identity = IdentityKeyPair::try_from(bytes.as_slice())
             .map_err(|err| AppError::Message(err.to_string()))?;
         let registration_id = registration_from_db(db)?;
-        let cert_der = db
+        let mut cert_der = db
             .signal_blob("cert_der")?
             .ok_or_else(|| AppError::Message("Missing certificate".into()))?;
-        let cert_key_pkcs8 = db
+        let mut cert_key_pkcs8 = db
             .signal_blob("cert_key")?
             .ok_or_else(|| AppError::Message("Missing certificate key".into()))?;
+        if !certificate_names_host(&cert_der, TLS_DNS_NAME) {
+            let mut rng = rand::rng();
+            let (next_der, next_key) = issue_certificate(&identity, &mut rng)?;
+            db.set_signal_blob("cert_der", &next_der)?;
+            db.set_signal_blob("cert_key", &next_key)?;
+            cert_der = next_der;
+            cert_key_pkcs8 = next_key;
+        }
         let distribution_id = distribution_from_db(db)?;
         return Ok(IdentityMaterial {
             device_id: app_device_id(&identity.identity_key().serialize()),
@@ -81,8 +91,10 @@ fn registration_from_db(db: &Db) -> AppResult<u32> {
     let bytes = db
         .signal_blob("registration_id")?
         .ok_or_else(|| AppError::Message("Missing registration id".into()))?;
-    let mut buf = [0u8; 4];
-    buf.copy_from_slice(&bytes[..4]);
+    let buf: [u8; 4] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| AppError::Message("Missing registration id".into()))?;
     Ok(u32::from_be_bytes(buf))
 }
 
@@ -106,13 +118,13 @@ fn issue_certificate(
         .private_key()
         .calculate_signature(&message, rng)
         .map_err(|err| AppError::Message(err.to_string()))?;
-    let mut params = CertificateParams::new(vec!["Multi-Device Music Player".into()])?;
+    let mut params = CertificateParams::new(vec![TLS_DNS_NAME.into()])?;
     params.distinguished_name = DistinguishedName::new();
     params
         .distinguished_name
-        .push(DnType::CommonName, "Multi-Device Music Player");
+        .push(DnType::CommonName, "TunePeerly");
     params.subject_alt_names = vec![SanType::DnsName(
-        "device.local".try_into().expect("static dns name"),
+        TLS_DNS_NAME.try_into().expect("static dns name"),
     )];
     params.custom_extensions.push(CustomExtension::from_oid_content(
         OID_IDENTITY,
@@ -129,7 +141,7 @@ fn issue_certificate(
 pub fn pairing_text(identity_public: &[u8], cert_der: &[u8], display_name: &str) -> String {
     let b64 = base64::engine::general_purpose::STANDARD;
     format!(
-        "device-music-pair\nname={display_name}\nidentity={}\ncert={}",
+        "tunepeerly-pair\nname={display_name}\nidentity={}\ncert={}",
         b64.encode(identity_public),
         b64.encode(cert_der)
     )
@@ -173,6 +185,20 @@ pub fn parse_pairing_text(text: &str) -> AppResult<ParsedPairing> {
         identity_public,
         cert_der,
     })
+}
+
+fn certificate_names_host(cert_der: &[u8], host: &str) -> bool {
+    let Ok((_, cert)) = x509_parser::parse_x509_certificate(cert_der) else {
+        return false;
+    };
+    cert.subject_alternative_name()
+        .ok()
+        .flatten()
+        .is_some_and(|san| {
+            san.value.general_names.iter().any(|name| {
+                matches!(name, x509_parser::extensions::GeneralName::DNSName(dns) if dns.eq_ignore_ascii_case(host))
+            })
+        })
 }
 
 pub fn certificate_binds(cert_der: &[u8], expected_identity: &[u8]) -> AppResult<bool> {

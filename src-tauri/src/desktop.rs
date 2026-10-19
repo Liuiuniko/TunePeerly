@@ -87,6 +87,7 @@ pub fn install(app: &AppHandle) {
         .max_inner_size(480.0, 76.0)
         .decorations(false)
         .shadow(true)
+        .background_color(tauri::window::Color(27, 23, 20, 255))
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
@@ -274,13 +275,11 @@ mod windows_media {
         },
         Storage::Streams::{DataWriter, InMemoryRandomAccessStream, RandomAccessStreamReference},
         Win32::{
-            Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
+            Foundation::{HWND, LPARAM, LRESULT, WPARAM},
             Graphics::{
                 Dwm::{DwmInvalidateIconicBitmaps, DwmSetIconicThumbnail, DwmSetWindowAttribute, DWMWINDOWATTRIBUTE},
                 Gdi::{
-                    ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW,
-                    DEFAULT_CHARSET, DeleteDC, DeleteObject, DrawTextW, DT_CENTER, GetDC, OUT_DEFAULT_PRECIS, ReleaseDC, SelectObject,
-                    SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DT_SINGLELINE, DT_VCENTER, HGDIOBJ, TRANSPARENT,
+                    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ,
                 },
             },
             System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
@@ -288,7 +287,7 @@ mod windows_media {
             UI::{
                 Shell::{
                     DefSubclassProc, ITaskbarList3, SetWindowSubclass, TaskbarList, THUMBBUTTON, THUMBBUTTONMASK, THBF_ENABLED,
-                    THBF_NOBACKGROUND, THBN_CLICKED, THB_FLAGS, THB_ICON, THB_TOOLTIP,
+                    THBN_CLICKED, THB_FLAGS, THB_ICON, THB_TOOLTIP,
                 },
                 WindowsAndMessaging::{CreateIconIndirect, GetSystemMetrics, ICONINFO, SM_CXSMICON, WM_COMMAND, WM_SIZE},
             },
@@ -611,119 +610,6 @@ mod windows_media {
     }
 
     fn draw_glyph(kind: Glyph, size: i32) -> Vec<u8> {
-        draw_geometric_glyph(kind, size)
-    }
-
-    #[allow(dead_code)]
-    fn draw_system_glyph(kind: Glyph, size: i32) -> Option<Vec<u8>> {
-        let code: u16 = match kind {
-            Glyph::Play => 0xE768,
-            Glyph::Pause => 0xE769,
-            Glyph::Prev => 0xE892,
-            Glyph::Next => 0xE893,
-            Glyph::Heart => 0xEB51,
-            Glyph::HeartFill => 0xEB52,
-        };
-        unsafe {
-            let screen = GetDC(None);
-            let mut info = BITMAPINFO::default();
-            info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-            info.bmiHeader.biWidth = size;
-            info.bmiHeader.biHeight = -size;
-            info.bmiHeader.biPlanes = 1;
-            info.bmiHeader.biBitCount = 32;
-            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-            let color = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
-            if bits.is_null() || color.is_invalid() {
-                ReleaseDC(None, screen);
-                return None;
-            }
-            std::ptr::write_bytes(bits, 0, (size * size * 4) as usize);
-            let dc = CreateCompatibleDC(Some(screen));
-            let previous = SelectObject(dc, HGDIOBJ(color.0));
-            let font = CreateFontW(
-                -(size - 2),
-                0,
-                0,
-                0,
-                400,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                ANTIALIASED_QUALITY,
-                0,
-                windows::core::w!("Segoe MDL2 Assets"),
-            );
-            let drawn = SelectObject(dc, HGDIOBJ(font.0));
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, COLORREF(0x00FFFFFF));
-            let mut text = [code, 0];
-            let mut rect = RECT { left: 0, top: 0, right: size, bottom: size };
-            DrawTextW(dc, &mut text, &mut rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(dc, drawn);
-            SelectObject(dc, previous);
-            let _ = DeleteObject(HGDIOBJ(font.0));
-            let _ = DeleteDC(dc);
-            let raw = std::slice::from_raw_parts(bits as *const u8, (size * size * 4) as usize);
-            let pixels = colorize(kind, raw, size);
-            let _ = DeleteObject(HGDIOBJ(color.0));
-            ReleaseDC(None, screen);
-            let visible = pixels.chunks_exact(4).any(|pixel| pixel[3] > 24);
-            visible.then_some(pixels)
-        }
-    }
-
-    fn colorize(kind: Glyph, raw: &[u8], size: i32) -> Vec<u8> {
-        let count = (size * size) as usize;
-        let mut alpha = vec![0u8; count];
-        for (index, pixel) in raw.chunks_exact(4).take(count).enumerate() {
-            alpha[index] = pixel[0].max(pixel[1]).max(pixel[2]);
-        }
-        let (red, green, blue) = match kind {
-            Glyph::HeartFill => (232, 84, 96),
-            _ => (255, 255, 255),
-        };
-        let mut pixels = vec![0u8; count * 4];
-        for index in 0..count {
-            let coverage = alpha[index];
-            if coverage < 20 {
-                let halo = neighbors_cover(&alpha, size, index);
-                if halo > 80 {
-                    pixels[index * 4 + 3] = 150;
-                }
-                continue;
-            }
-            pixels[index * 4] = ((blue as u16 * coverage as u16) / 255) as u8;
-            pixels[index * 4 + 1] = ((green as u16 * coverage as u16) / 255) as u8;
-            pixels[index * 4 + 2] = ((red as u16 * coverage as u16) / 255) as u8;
-            pixels[index * 4 + 3] = coverage;
-        }
-        pixels
-    }
-
-    fn neighbors_cover(alpha: &[u8], size: i32, index: usize) -> u8 {
-        let x = index as i32 % size;
-        let y = index as i32 / size;
-        let mut best = 0u8;
-        for oy in -1..=1 {
-            for ox in -1..=1 {
-                if ox == 0 && oy == 0 {
-                    continue;
-                }
-                let nx = x + ox;
-                let ny = y + oy;
-                if (0..size).contains(&nx) && (0..size).contains(&ny) {
-                    best = best.max(alpha[(ny * size + nx) as usize]);
-                }
-            }
-        }
-        best
-    }
-
-    fn draw_geometric_glyph(kind: Glyph, size: i32) -> Vec<u8> {
         let step = 8i32;
         let big = size * step;
         let heart = matches!(kind, Glyph::Heart | Glyph::HeartFill);

@@ -47,7 +47,7 @@ function ProblemGroup({ title, help, tracks }: { title: string; help: string; tr
       <p className="setting-help">{help}</p>
       <ul className="problem-list">
         {tracks.map((track, at) => (
-          <li key={trackKey(track)} className="problem-item">
+          <li key={track.localFileId ?? `${trackKey(track)}:${at}`} className="problem-item">
             <Cover src={track.coverUrl} className="row-cover" />
             <div className="problem-text">
               <div className="problem-title">{displayTitle(track, t("library.untitled"))}</div>

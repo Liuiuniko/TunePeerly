@@ -28,10 +28,6 @@ const FEATURES: Feature[] = ["favorites", "playlists", "appearance"];
 const BLOCKS = ["manual", "source", "all"] as const;
 type BlockKey = (typeof BLOCKS)[number];
 
-function appliesTo(_feature: Feature, _block: BlockKey): boolean {
-  return true;
-}
-
 export function SettingsPage() {
   const { t } = useTranslation();
   const app = useApp();
@@ -544,7 +540,7 @@ function SyncTable() {
   const toggle = (feature: Feature, block: BlockKey, value: boolean) => {
     const current = { ...(blocks[feature] ?? {}) };
     if (block === "all") {
-      for (const key of BLOCKS) if (appliesTo(feature, key)) current[key] = value;
+      for (const key of BLOCKS) current[key] = value;
     } else {
       current[block] = value;
       if (!value) current.all = false;
@@ -552,18 +548,16 @@ function SyncTable() {
     setBlocks({ ...blocks, [feature]: current });
   };
   const globalState = (block: BlockKey) => {
-    const list = FEATURES.filter((feature) => appliesTo(feature, block));
-    const count = list.filter((feature) => flag(feature, block)).length;
-    return count === 0 ? "off" : count === list.length ? "on" : "mixed";
+    const count = FEATURES.filter((feature) => flag(feature, block)).length;
+    return count === 0 ? "off" : count === FEATURES.length ? "on" : "mixed";
   };
   const toggleGlobal = (block: BlockKey) => {
     const value = globalState(block) !== "on";
     const next = { ...blocks };
     for (const feature of FEATURES) {
-      if (!appliesTo(feature, block)) continue;
       const current = { ...(next[feature] ?? {}) };
       if (block === "all") {
-        for (const key of BLOCKS) if (appliesTo(feature, key)) current[key] = value;
+        for (const key of BLOCKS) current[key] = value;
       } else {
         current[block] = value;
         if (!value) current.all = false;
@@ -581,7 +575,6 @@ function SyncTable() {
         <span title={t("sync.sourceHelp")}>{t("sync.source")}</span>
         <span title={t("sync.blockManualHelp")}>{t("sync.blockManual")}</span>
         <span title={t("sync.blockSourceHelp")}>{t("sync.blockSource")}</span>
-        <span title={t("sync.blockTimestampHelp")}>{t("sync.blockTimestamp")}</span>
         <span title={t("sync.blockAllHelp")}>{t("sync.blockAll")}</span>
         <span />
       </div>
@@ -622,7 +615,7 @@ function SyncTable() {
             </span>
             {BLOCKS.map((block) => (
               <span key={block} className="sync-check">
-                {appliesTo(feature, block) ? <Check state={flag(feature, block) ? "on" : "off"} label={t(`sync.block${block[0].toUpperCase()}${block.slice(1)}`)} onChange={(value) => toggle(feature, block, value)} /> : <span className="muted">—</span>}
+                <Check state={flag(feature, block) ? "on" : "off"} label={t(`sync.block${block[0].toUpperCase()}${block.slice(1)}`)} onChange={(value) => toggle(feature, block, value)} />
               </span>
             ))}
             <span>

@@ -3,7 +3,7 @@
   "productName": "TunePeerly",
   "mainBinaryName": "TunePeerly",
   "version": "0.6.0",
-  "identifier": "app.devicemusic",
+  "identifier": "com.zhebuilds.tunepeerly",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -11,6 +11,10 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "appDirectoriesOverride": {
+      "localData": "$LOCALDATA/TunePeerly",
+      "cache": "$CACHE/TunePeerly"
+    },
     "windows": [
       {
         "label": "main",
@@ -35,6 +39,7 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "zhebuilds",
     "targets": "all",
     "icon": [
       "icons/32x32.png",

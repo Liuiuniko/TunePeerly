@@ -23,6 +23,12 @@ import { Cover } from "./Cover";
 
 const ROW = 56;
 
+function playIndex(playTracks: Track[] | undefined, tracks: Track[], at: number): number {
+  if (!playTracks) return at;
+  const found = playTracks.indexOf(tracks[at]);
+  return found >= 0 ? found : at;
+}
+
 export type Columns = { album?: boolean; folder?: boolean; added?: boolean; source?: boolean; number?: "index" | "track" };
 
 type Props = {
@@ -36,9 +42,11 @@ type Props = {
   reorderable?: boolean;
   columns?: Columns;
   empty?: ReactNode;
+  /** Playback list when `tracks` is only the rows on screen. Indexes follow `tracks`. */
+  playTracks?: Track[];
 };
 
-export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playlistId, reorderId, reorderable, columns = {}, empty }: Props) {
+export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playlistId, reorderId, reorderable, columns = {}, empty, playTracks }: Props) {
   const { t } = useTranslation();
   const app = useApp();
   const scroller = useScrollRoot();
@@ -56,7 +64,9 @@ export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playl
     const update = () => {
       const offset = list.getBoundingClientRect().top - root.getBoundingClientRect().top;
       const start = Math.max(0, Math.floor(-offset / ROW) - 10);
-      const end = Math.min(tracks.length, Math.ceil((root.clientHeight - offset) / ROW) + 10);
+      // A negative end is not "nothing": Array.slice treats it as an offset from the end.
+      const visibleEnd = Math.ceil((root.clientHeight - offset) / ROW) + 10;
+      const end = Math.min(tracks.length, Math.max(start, visibleEnd));
       setRange((value) => (value.start === start && value.end === end ? value : { start, end }));
     };
     update();
@@ -160,13 +170,13 @@ export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playl
               onSelect={select}
               onPlay={(at) => {
                 if (key === currentKey && at === index && app.current) app.toggle();
-                else app.playList(tracks, at, contextId);
+                else app.playList(playTracks ?? tracks, playIndex(playTracks, tracks, at), contextId);
               }}
               onMenu={(event, at) => {
                 event.preventDefault();
                 const items = chosen(at);
                 if (!selected.has(keys[at])) setSelected(new Set([keys[at]]));
-                app.setMenu({ x: event.clientX, y: event.clientY, tracks: items, playlistId, play: () => app.playList(tracks, at, contextId) });
+                app.setMenu({ x: event.clientX, y: event.clientY, tracks: items, playlistId, play: () => app.playList(playTracks ?? tracks, playIndex(playTracks, tracks, at), contextId) });
               }}
               onDrag={(event, at) =>
                 beginDrag(

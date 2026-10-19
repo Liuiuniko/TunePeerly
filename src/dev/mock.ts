@@ -119,12 +119,10 @@ const lrc = `[ti:Morning Light]
 const settings: Record<string, unknown> = {
   showUnavailable: true,
   historyCap: 100,
-  historySyncMode: "utc",
   incognito: false,
   syncSources: { favorites: "dev-studio" },
-  syncBlocks: { history: { timestamp: true } },
+  syncBlocks: { playlists: { manual: true } },
   exposeDefault: "hide",
-  positionSync: false,
   positionSyncDevice: "",
   downloadFolder: "",
   volume: 0.8,
@@ -265,6 +263,8 @@ function bootstrap(): Bootstrap {
     nearby: empty ? [] : [{ deviceId: "dev-living", name: "Living Room", host: "192.168.1.31", hosts: ["192.168.1.31", "10.0.0.31"], port: 22000 }],
     links: structuredClone(links),
     relay: "",
+    downloadQueue: [],
+    downloadHistory: [],
     offer: state.offer,
     download: state.download,
     manual: state.manual,
@@ -439,6 +439,7 @@ async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "playback_result":
     case "remote_failure":
     case "expose_members":
+    case "reveal_path":
     case "move_membership":
     case "show_in_folder":
     case "quit_app":

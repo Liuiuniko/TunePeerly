@@ -1,5 +1,5 @@
 [package]
-name = "device-music"
+name = "tunepeerly"
 version = "0.6.0"
 description = "TunePeerly"
 authors = ["CodeWithZhe"]
@@ -11,7 +11,7 @@ name = "TunePeerly"
 path = "src/main.rs"
 
 [lib]
-name = "device_music_lib"
+name = "tunepeerly_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

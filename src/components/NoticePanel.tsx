@@ -36,6 +36,7 @@ export function NoticePanel() {
   const [menu, setMenu] = useState<{ notice: Notice; x: number; y: number } | null>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const sent = useRef(new Set<number>());
+  const held = useRef(new Set<number>());
 
   const run = (payload: Record<string, unknown>) => void api.network("notice", payload).then(app.scheduleRefresh).catch(app.say);
 
@@ -54,15 +55,24 @@ export function NoticePanel() {
     const mark = () => {
       const box = root.getBoundingClientRect();
       const ids: number[] = [];
-      for (const row of root.querySelectorAll<HTMLElement>("[data-unread='1']")) {
+      const seen = new Set<number>();
+      for (const row of root.querySelectorAll<HTMLElement>("[data-id]")) {
+        const id = Number(row.dataset.id);
+        if (!id) continue;
+        seen.add(id);
         const rect = row.getBoundingClientRect();
         const shown = Math.min(rect.bottom, box.bottom) - Math.max(rect.top, box.top);
-        const id = Number(row.dataset.id);
-        if (shown >= Math.min(rect.height, 28) && id && !sent.current.has(id)) ids.push(id);
+        const visible = shown >= Math.min(rect.height, 28);
+        if (!visible) held.current.delete(id);
+        if (visible && row.dataset.unread === "1" && !sent.current.has(id) && !held.current.has(id)) ids.push(id);
       }
+      for (const id of [...held.current]) if (!seen.has(id)) held.current.delete(id);
       if (ids.length === 0) return;
       for (const id of ids) sent.current.add(id);
-      run({ action: "read-ids", ids });
+      void api.network("notice", { action: "read-ids", ids }).then(app.scheduleRefresh).catch((error: unknown) => {
+        for (const id of ids) sent.current.delete(id);
+        app.say(error);
+      });
     };
     mark();
     root.addEventListener("scroll", mark, { passive: true });

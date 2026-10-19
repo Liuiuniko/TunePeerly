@@ -26,13 +26,15 @@ export function parseLyrics(source: string): Lyrics {
       rest = line.slice(stamp.lastIndex);
     }
     if (times.length > 0) {
+      stamp.lastIndex = 0;
       const text = rest.replace(stamp, "").trim();
-      for (const time of times) timed.push({ time: Math.max(0, time - offset), text });
+      for (const time of times) timed.push({ time, text });
     } else {
       plain.push(raw.trimEnd());
     }
   }
   if (timed.length > 0) {
+    for (const line of timed) line.time = Math.max(0, line.time - offset);
     timed.sort((a, b) => a.time - b.time);
     return { timed: true, lines: timed };
   }

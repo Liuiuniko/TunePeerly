@@ -48,7 +48,7 @@ pub struct LinkStatus {
 }
 
 #[derive(Clone)]
-struct OverwriteAsk {
+pub(crate) struct OverwriteAsk {
     id: u64,
     device_id: String,
     name: String,
@@ -76,6 +76,16 @@ pub struct DownloadStatus {
     pub content_id: String,
     pub state: String,
     pub detail: String,
+    pub title: String,
+    pub received: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedDownload {
+    pub content_id: String,
+    pub title: String,
 }
 
 #[derive(Clone)]
@@ -92,6 +102,8 @@ pub struct LiveInner {
     pub port_fallback: Option<u16>,
     pub relay: String,
     pub download: Option<DownloadStatus>,
+    /// Songs waiting because another download is already copying.
+    pub download_queue: VecDeque<QueuedDownload>,
     pub offer: Option<PairingOffer>,
     pub manual: Option<String>,
     pub failures: HashMap<String, String>,
@@ -171,6 +183,7 @@ pub fn spawn(
     };
     let bus = AudioBus::new();
     let (tx, rx) = mpsc::unbounded_channel();
+    let tx_loop = tx.clone();
     let (pull_tx, pull_rx) = mpsc::unbounded_channel();
     let (media_ready_tx, media_ready_rx) = std::sync::mpsc::sync_channel(1);
     let live_thread = live.clone();
@@ -183,7 +196,7 @@ pub fn spawn(
         let local = tokio::task::LocalSet::new();
         runtime.block_on(local.run_until(async move {
             tokio::task::spawn_local(media::serve(bus_thread.clone(), pull_tx, media_ready_tx));
-            run(app, db, material, rx, pull_rx, live_thread, bus_thread).await;
+            run(app, db, material, tx_loop, rx, pull_rx, live_thread, bus_thread).await;
         }));
     });
     media_ready_rx
@@ -208,6 +221,7 @@ async fn run(
     app: AppHandle,
     db: Arc<Mutex<Db>>,
     material: IdentityMaterial,
+    tx: mpsc::UnboundedSender<Cmd>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     mut pull_rx: mpsc::UnboundedReceiver<Pull>,
     live: Live,
@@ -416,7 +430,7 @@ async fn run(
                         resolve_pending(&app, &db, &feature, take);
                     }
                     Cmd::Download(content_id) => {
-                        start_download(&app, &db, &peers, &live, &bus, content_id).await;
+                        start_download(&app, &db, &peers, &live, &bus, &tx, content_id).await;
                     }
                     Cmd::Activity { playing, local_file_id, buffer_enough } => {
                         if let Ok(mut guard) = live.inner.lock() {
@@ -863,7 +877,7 @@ async fn dial_peer(
             Err(_) => return failed(&events),
         };
         let connector = TlsConnector::from(Arc::new(config));
-        let name = rustls::pki_types::ServerName::try_from("device.local").expect("name");
+        let name = rustls::pki_types::ServerName::try_from(crate::identity::TLS_DNS_NAME).expect("name");
         let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(5), connector.connect(name, stream)).await else {
             return failed(&events);
         };
@@ -1724,7 +1738,7 @@ mod lan_tests {
     }
 
     fn test_store(name: &str) -> (crate::identity::IdentityMaterial, crate::identity::SignalStore) {
-        let dir = std::env::temp_dir().join(format!("dm-net-test-{name}-{}", rand::random::<u64>()));
+        let dir = std::env::temp_dir().join(format!("tunepeerly-net-test-{name}-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).expect("dir");
         let db = crate::db::Db::open(&dir.join("library.db"), dir.clone(), dir.join("cache")).expect("db");
         let material = crate::identity::load_or_create(&db).expect("identity");
@@ -2036,7 +2050,7 @@ async fn join_invited(
             let _ = finish_handshake(tls, certs, db.clone(), parts, events, "relay".into(), dialed_by, false, None).await;
         } else {
             let Ok(config) = tls::client_config(provider, &parts.cert_der, &parts.cert_key, verifier, None) else { return };
-            let Ok(name) = rustls::pki_types::ServerName::try_from("device.local") else { return };
+            let Ok(name) = rustls::pki_types::ServerName::try_from(crate::identity::TLS_DNS_NAME) else { return };
             let Ok(tls) = TlsConnector::from(Arc::new(config)).connect(name, stream).await else { return };
             let certs = tls.get_ref().1.peer_certificates().map(|certs| certs.to_vec()).unwrap_or_default();
             let _ = finish_handshake(tls, certs, db, parts, events, "relay".into(), dialed_by, false, None).await;
@@ -2447,7 +2461,7 @@ fn apply_plain(
                 return;
             }
             if !manual {
-                let blocks = guard.block_flags(&feature).unwrap_or(crate::db::BlockFlags { manual: false, source: false, timestamp: false, all: false });
+                let blocks = guard.block_flags(&feature).unwrap_or(crate::db::BlockFlags { manual: false, source: false, all: false });
                 let source = guard.sync_source(&feature).unwrap_or(None);
                 if blocks.source || blocks.all || source.as_deref() != Some(device_id) {
                     return;
@@ -2794,7 +2808,7 @@ async fn send_sync(
             eprintln!("sync {feature}: not sent, sync is off");
             return;
         }
-        let blocks = guard.block_flags(feature).unwrap_or(crate::db::BlockFlags { manual: false, source: false, timestamp: false, all: false });
+        let blocks = guard.block_flags(feature).unwrap_or(crate::db::BlockFlags { manual: false, source: false, all: false });
         if blocks.manual || blocks.all {
             eprintln!("sync {feature}: not sent, manual sync is blocked");
             return;
@@ -3001,21 +3015,13 @@ fn apply_snapshot_payload(db: &Db, feature: &str, items: &Value) {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let cap = db.setting_i64("historyCap").unwrap_or(100).max(1) as usize;
-            let merged = sync_logic::merge_history(Vec::new(), entries, chrono::Utc::now(), cap);
-            let _ = db.replace_synced_history(&merged);
+            let _ = merge_history_into_db(db, entries);
         }
         "favorites" => {
             let ids = items.as_array().map(|rows| rows.iter().filter_map(|item| item.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
             let existing = db.content_member_refs("favorites", None).unwrap_or_default();
             let kept = sync_logic::apply_member_snapshot(&existing, &ids);
-            let _ = db.conn.execute("DELETE FROM favorites", []);
-            for member in kept {
-                let _ = db.conn.execute(
-                    "INSERT INTO favorites(content_id, local_file_id) VALUES(?1, ?2)",
-                    rusqlite::params![member.content_id, member.local_file_id],
-                );
-            }
+            let _ = db.replace_favorites(&kept);
         }
         "appearance" => {
             if let Some(text) = items.get("theme").and_then(|value| value.as_str()) {
@@ -3289,32 +3295,103 @@ fn b64_bytes(bytes: &[u8]) -> String {
     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
 }
 
+fn dequeue_download(live: &Live, tx: &mpsc::UnboundedSender<Cmd>) {
+    let next = live.inner.lock().ok().and_then(|mut guard| guard.download_queue.pop_front());
+    if let Some(next) = next {
+        let _ = tx.send(Cmd::Download(next.content_id));
+    }
+}
+
+fn song_title(db: &Db, content_id: &str) -> String {
+    let from_library = db
+        .conn
+        .query_row(
+            "SELECT title FROM content_items WHERE content_id = ?1",
+            rusqlite::params![content_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|title| !title.is_empty());
+    if let Some(title) = from_library {
+        return title;
+    }
+    db.conn
+        .query_row(
+            "SELECT title FROM holdings WHERE content_id = ?1 AND title != '' LIMIT 1",
+            rusqlite::params![content_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default()
+}
+
+fn store_download(live: &Live, status: DownloadStatus) {
+    if let Ok(mut guard) = live.inner.lock() {
+        guard.download = Some(status);
+    }
+}
+
+fn publish_download(app: &AppHandle, live: &Live, history: Option<Value>, refresh: bool) {
+    let body = live.inner.lock().ok().map(|guard| {
+        json!({
+            "current": guard.download.clone(),
+            "queue": guard.download_queue.clone(),
+            "history": history,
+        })
+    });
+    if let Some(body) = body {
+        let _ = app.emit("download-updated", body);
+    }
+    if refresh {
+        let _ = app.emit("network-updated", json!({}));
+    }
+}
+
 async fn start_download(
     app: &AppHandle,
     db: &Arc<Mutex<Db>>,
     peers: &HashMap<String, PeerOut>,
     live: &Live,
     bus: &Arc<AudioBus>,
+    tx: &mpsc::UnboundedSender<Cmd>,
     content_id: String,
 ) {
-    let set_status = |content_id: &str, state: &str, detail: &str| {
-        if let Ok(mut status) = live.inner.lock() {
-            status.download = Some(DownloadStatus { content_id: content_id.to_string(), state: state.into(), detail: detail.into() });
-        }
-        let _ = app.emit("network-updated", json!({}));
+    let set_status = |content_id: &str, state: &str, detail: &str, title: &str| {
+        store_download(live, DownloadStatus {
+            content_id: content_id.to_string(),
+            state: state.into(),
+            detail: detail.into(),
+            title: title.into(),
+            received: 0,
+            total: 0,
+        });
+        publish_download(app, live, None, true);
     };
     if live.inner.lock().map(|guard| guard.download.as_ref().is_some_and(|item| item.state == "started")).unwrap_or(false) {
-        return set_status(&content_id, "busy", "");
+        let title = db.lock().ok().map(|guard| song_title(&guard, &content_id)).unwrap_or_default();
+        if let Ok(mut guard) = live.inner.lock() {
+            let current = guard.download.as_ref().map(|item| item.content_id.clone());
+            if current.as_deref() != Some(content_id.as_str()) && !guard.download_queue.iter().any(|item| item.content_id == content_id) {
+                guard.download_queue.push_back(QueuedDownload { content_id, title });
+            }
+        }
+        publish_download(app, live, None, false);
+        return;
     }
     let guard = db.lock().expect("db");
     if guard.setting_bool("incognito").unwrap_or(false) {
         drop(guard);
-        return set_status(&content_id, "failed", "notice.offlineTrack");
+        if let Ok(mut queued) = live.inner.lock() {
+            queued.download_queue.clear();
+        }
+        return set_status(&content_id, "failed", "notice.offlineTrack", "");
     }
     let folder = guard.setting_string("downloadFolder").unwrap_or_default();
     if folder.is_empty() {
         drop(guard);
-        return set_status(&content_id, "need-folder", "");
+        if let Ok(mut queued) = live.inner.lock() {
+            queued.download_queue.clear();
+        }
+        return set_status(&content_id, "need-folder", "", "");
     }
     let holders: Vec<(String, String, String)> = {
         let mut stmt = guard.conn.prepare(
@@ -3337,15 +3414,19 @@ async fn start_download(
         .filter_map(|source| peers.get(&source.device_id).map(|peer| (source.clone(), peer.tx.clone())))
         .collect();
     let SourceChoice::Play(first) = choose_download_source(&sources, None) else {
-        return set_status(&content_id, "failed", "notice.offlineTrack");
+        set_status(&content_id, "failed", "notice.offlineTrack", "");
+        dequeue_download(live, tx);
+        return;
     };
-    set_status(&content_id, "started", &folder);
     let title = holders.iter().find(|row| row.0 == first.device_id && !row.1.is_empty()).map(|row| row.1.clone()).unwrap_or_default();
+    let title = if title.is_empty() { db.lock().ok().map(|guard| song_title(&guard, &content_id)).unwrap_or_default() } else { title };
     let codec = holders.iter().find(|row| row.0 == first.device_id).map(|row| row.2.clone()).unwrap_or_else(|| "audio".into());
+    set_status(&content_id, "started", &folder, &title);
     let app = app.clone();
     let db = db.clone();
     let live = live.clone();
     let bus = bus.clone();
+    let cmd_tx = tx.clone();
     tokio::task::spawn_local(async move {
         let mut attempt = Some(first);
         let mut bytes = Vec::new();
@@ -3373,6 +3454,8 @@ async fn start_download(
             }
             bytes.clear();
             let mut failed = false;
+            let mut total_bytes = 0u64;
+            let mut last_progress = Instant::now() - Duration::from_secs(1);
             loop {
                 let piece = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await;
                 let Ok(Some(piece)) = piece else { failed = true; break };
@@ -3380,12 +3463,30 @@ async fn start_download(
                     failed = true;
                     break;
                 }
-                let at = piece.offset as usize;
-                if bytes.len() < at {
-                    bytes.resize(at, 0);
+                if let Some(total) = piece.total {
+                    total_bytes = total_bytes.max(total);
                 }
-                bytes.truncate(at);
-                bytes.extend_from_slice(&piece.data);
+                if !piece.data.is_empty() {
+                    let at = piece.offset as usize;
+                    if bytes.len() < at {
+                        bytes.resize(at, 0);
+                    }
+                    bytes.truncate(at);
+                    bytes.extend_from_slice(&piece.data);
+                }
+                let due = last_progress.elapsed() >= Duration::from_millis(200) || piece.eof;
+                if due {
+                    last_progress = Instant::now();
+                    if let Ok(mut guard) = live.inner.lock() {
+                        if let Some(status) = guard.download.as_mut() {
+                            if status.content_id == content_id && status.state == "started" {
+                                status.received = bytes.len() as u64;
+                                status.total = total_bytes;
+                            }
+                        }
+                    }
+                    publish_download(&app, &live, None, false);
+                }
                 if piece.eof {
                     break;
                 }
@@ -3404,36 +3505,49 @@ async fn start_download(
             }
         }
         let finish = |state: &str, detail: &str| {
-            if let Ok(mut status) = live.inner.lock() {
-                status.download = Some(DownloadStatus { content_id: content_id.clone(), state: state.into(), detail: detail.into() });
-            }
+            store_download(&live, DownloadStatus {
+                content_id: content_id.clone(),
+                state: state.into(),
+                detail: detail.into(),
+                title: title.clone(),
+                received: bytes.len() as u64,
+                total: bytes.len() as u64,
+            });
+        };
+        let remember = |path: &str, saved_ok: bool| -> Option<Value> {
+            db.lock().ok().and_then(|guard| guard.push_download_history(&content_id, &title, path, saved_ok).ok())
         };
         if !ok {
             finish("failed", "");
-            let _ = app.emit("network-updated", json!({}));
+            let history = remember("", false);
+            publish_download(&app, &live, history, true);
+            dequeue_download(&live, &cmd_tx);
             return;
-        }
-        while live.inner.lock().map(|guard| guard.playing || guard.serving).unwrap_or(false) {
-            tokio::time::sleep(Duration::from_millis(400)).await;
         }
         let directory = PathBuf::from(&folder);
         let _ = std::fs::create_dir_all(&directory);
         let name = download_name(&title, &codec, &content_id);
-        let temp = directory.join(format!(".device-music-download-{content_id}.part"));
+        let temp = directory.join(format!(".tunepeerly-download-{content_id}.part"));
         let final_path = unique_path(&directory, &name);
         let saved = std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, &final_path));
-        if saved.is_err() {
+        let (history, saved_ok) = if saved.is_err() {
             let _ = std::fs::remove_file(&temp);
             finish("failed", &folder);
+            (remember(&folder, false), false)
         } else {
             if crate::scan::import_path(&db, &directory, "directory").is_ok() {
                 use tauri::Manager;
                 let _ = app.asset_protocol_scope().allow_directory(&directory, true);
             }
-            finish("saved", &final_path.to_string_lossy());
+            let path = final_path.to_string_lossy().to_string();
+            finish("saved", &path);
+            (remember(&path, true), true)
+        };
+        publish_download(&app, &live, history, true);
+        if saved_ok {
+            let _ = app.emit("library-updated", json!({}));
         }
-        let _ = app.emit("library-updated", json!({}));
-        let _ = app.emit("network-updated", json!({}));
+        dequeue_download(&live, &cmd_tx);
     });
 }
 
@@ -3455,13 +3569,14 @@ fn unique_path(directory: &PathBuf, name: &str) -> PathBuf {
     let path = std::path::Path::new(name);
     let stem = path.file_stem().and_then(|text| text.to_str()).unwrap_or("track");
     let ext = path.extension().and_then(|text| text.to_str()).unwrap_or("audio");
-    for index in 2..1000 {
+    for index in 2..10_000 {
         let candidate = directory.join(format!("{stem} ({index}).{ext}"));
         if !candidate.exists() {
             return candidate;
         }
     }
-    directory.join(name)
+    let tick = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_millis()).unwrap_or(0);
+    directory.join(format!("{stem}-{tick}.{ext}"))
 }
 
 fn decode_bundle(bytes: &[u8]) -> AppResult<libsignal_protocol::PreKeyBundle> {
