@@ -25,3 +25,6 @@ dist-ssr
 *.sw?
 
 temp/*
+
+# Inno Setup compiler output
+installer/Output/
