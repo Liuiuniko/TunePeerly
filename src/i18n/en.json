@@ -638,7 +638,13 @@
     "privacy": "Privacy",
     "privacyHelp": "There is no account. Your library, playlists, listening history, and pairing details stay on your own devices. Away from your local network, that data is sent through a relay server you configure, which only forwards it to your other devices. Devices encrypt it end to end with libsignal, so the relay cannot read it.",
     "components": "Built with",
-    "componentsHelp": "Tauri, Rust, and React, along with other open-source components. Each of those projects keeps its own license."
+    "componentsHelp": "Tauri, Rust, and React, along with other open-source components. Each of those projects keeps its own license.",
+    "credits": "Credits and licenses",
+    "creditsOriginal": "Original work © 2026 zhebuilds. Based on TunePeerly.",
+    "creditsModify": "A modified version may name its own author and redesign this screen. It must keep the original-work notice, state that it is modified, and not present itself as an official TunePeerly or 声渡 release.",
+    "creditsBrand": "TunePeerly, 声渡, and the official icon identify official releases. Another product needs permission to use them as its own name or logo. Saying that a version is based on TunePeerly is allowed.",
+    "additionalTerms": "Additional terms",
+    "trademarks": "Trademark policy"
   },
   "format": {
     "hoursMinutes": "{{hours}} hr {{minutes}} min",

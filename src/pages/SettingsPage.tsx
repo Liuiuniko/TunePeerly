@@ -10,6 +10,8 @@ import { relayLabel } from "./DevicesPage";
 
 const SOURCE_URL = "https://github.com/zhebuilds/TunePeerly";
 const LICENSE_URL = "https://www.gnu.org/licenses/agpl-3.0.html";
+const TERMS_URL = `${SOURCE_URL}/blob/main/ADDITIONAL_TERMS.md`;
+const MARKS_URL = `${SOURCE_URL}/blob/main/TRADEMARKS.md`;
 const FALLBACK_VERSION = "0.6.0";
 
 function openLink(url: string) {
@@ -435,9 +437,23 @@ function AboutPanel({ nodeRef }: { nodeRef: (node: HTMLElement | null) => void }
         </div>
       </div>
       <p className="setting-help about-summary">{t("about.summary")}</p>
+      <h3>{t("about.credits")}</h3>
+      <p className="setting-help">{t("about.creditsOriginal")}</p>
+      <p className="setting-help">{t("about.creditsModify")}</p>
+      <p className="setting-help">{t("about.creditsBrand")}</p>
       <Row title={t("about.license")} help={t("about.licenseHelp")}>
         <button type="button" className="btn soft" onClick={() => openLink(LICENSE_URL)}>
           {t("about.licenseName")} <Icons.external />
+        </button>
+      </Row>
+      <Row title={t("about.additionalTerms")}>
+        <button type="button" className="btn soft" onClick={() => openLink(TERMS_URL)}>
+          {t("about.open")} <Icons.external />
+        </button>
+      </Row>
+      <Row title={t("about.trademarks")}>
+        <button type="button" className="btn soft" onClick={() => openLink(MARKS_URL)}>
+          {t("about.open")} <Icons.external />
         </button>
       </Row>
       <Row
