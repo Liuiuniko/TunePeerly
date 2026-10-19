@@ -1,3 +1,7 @@
-# 正式文档
+# Docs
 
-这里放已经确定、给使用者看的说明。还在改的设计和部署草稿放在 `temp/docs`。
+[User guide](guide.md) · [使用手册](guide.zh-CN.md)
+
+[Additional terms](../ADDITIONAL_TERMS.md) · [Trademark policy](../TRADEMARKS.md) · [Notice](../NOTICE)
+
+Finished user-facing documents live here. Drafts stay in `temp/docs`.
