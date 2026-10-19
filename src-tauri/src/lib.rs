@@ -107,7 +107,7 @@ fn import_paths(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>, 
     for path in &paths {
         let summary = scan::import_path(&state.db, Path::new(path), &kind)?;
         if !allow_grant(&app, &summary.kind, path) {
-            let _ = state.db.lock().expect("db").delete_grant(summary.grant_id);
+            let _ = state.db.lock().expect("db").delete_grant(summary.grant_id, false);
             return Err(AppError::Message("file.unreadable".into()));
         }
         summaries.push(summary);
@@ -122,6 +122,8 @@ fn rescan(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
     let grants = state.db.lock().expect("db").grants()?;
     for grant in grants {
         if Path::new(&grant.path).exists() {
+            // A drive that was connected after start-up is not in the asset scope yet.
+            allow_grant(&app, &grant.kind, &grant.path);
             let _ = scan::import_path(&state.db, Path::new(&grant.path), &grant.kind);
         }
     }
@@ -143,19 +145,10 @@ fn allow_grant(app: &AppHandle, kind: &str, path: &str) -> bool {
 #[tauri::command(async)]
 fn remove_grant(app: AppHandle, state: State<'_, AppState>, id: i64) -> AppResult<()> {
     let db = state.db.lock().expect("db");
-    if let Some(grant) = db.delete_grant(id)? {
-        let scope = app.asset_protocol_scope();
-        if grant.kind == "directory" {
-            let _ = scope.forbid_directory(grant.path, true);
-        } else {
-            let _ = scope.forbid_file(grant.path);
-        }
-        for kept in db.grants()? {
-            if kept.kind == "file" {
-                let _ = scope.allow_file(kept.path);
-            }
-        }
-    }
+    // The asset scope is left alone on purpose. A forbidden path wins over any later allow and cannot
+    // be lifted, so adding the same folder again would fail every play with "format not supported".
+    // Its songs stay in the library as unavailable, and nothing plays an unavailable song.
+    db.delete_grant(id, true)?;
     drop(db);
     let _ = state.net.tx.send(net::Cmd::Publish);
     let _ = app.emit("library-updated", json!({}));

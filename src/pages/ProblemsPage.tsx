@@ -20,7 +20,7 @@ export function ProblemsPage() {
       <h1 className="page-title">{t("problems.title")}</h1>
       <p className="setting-help">{t("problems.help")}</p>
       <div className="button-row">
-        <button type="button" className="btn soft" onClick={() => void api.rescan().then(() => app.toast(t("toast.rescanned"))).catch(app.say)}>
+        <button type="button" className="btn soft" onClick={() => void app.rescan()}>
           <Icons.sync /> {t("library.rescan")}
         </button>
       </div>

@@ -99,6 +99,9 @@ export function TrackListPage({ route }: { route: Route }) {
             <button type="button" className="btn ghost" title={t("library.addFiles")} aria-label={t("library.addFiles")} onClick={() => void app.addMusic("file")}>
               <Icons.music /> <span className="btn-label">{t("library.addFiles")}</span>
             </button>
+            <button type="button" className="btn ghost" title={t("library.scanHint")} aria-label={t("library.scanHint")} onClick={() => void app.rescan()}>
+              <Icons.sync /> <span className="btn-label">{t("library.scan")}</span>
+            </button>
             <button type="button" className={`icon-btn lg${sharingOpen ? " on" : ""}`} aria-label={t("playlist.sharing")} title={t("playlist.sharing")} aria-pressed={sharingOpen} onClick={() => setSharingOpen((value) => !value)}>
               <Icons.eye />
             </button>

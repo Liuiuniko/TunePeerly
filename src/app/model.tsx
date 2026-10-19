@@ -207,6 +207,13 @@ function useModel() {
   const refreshRequest = useRef(0);
   const membersRequest = useRef(0);
   const lyricsRequest = useRef({ id: 0, key: null as string | null });
+  const scanning = useRef(false);
+  const [lyricsEpoch, setLyricsEpoch] = useState(0);
+  /** Lyrics are kept per song. After a scan the song on screen may have a new `.lrc`, so ask again. */
+  const reloadLyrics = useCallback(() => {
+    lyricsRequest.current = { id: lyricsRequest.current.id + 1, key: null };
+    setLyricsEpoch((value) => value + 1);
+  }, []);
 
   const tracks = useMemo(() => boot?.tracks ?? [], [boot]);
   const index = useMemo(() => new TrackIndex(tracks), [tracks]);
@@ -684,11 +691,29 @@ function useModel() {
       const summaries = await api.importPaths(paths, kind);
       const added = summaries.reduce((sum, item) => sum + item.added, 0);
       toast(added > 0 ? t("toast.imported", { count: added }) : t("toast.importedNone"));
+      reloadLyrics();
       await refresh();
     } catch (error) {
       say(error);
     }
-  }, [refresh, say, t, toast]);
+  }, [refresh, reloadLyrics, say, t, toast]);
+
+  /** Scans every added folder and file again. Tags and lyrics files that changed are read again. */
+  const rescan = useCallback(async () => {
+    if (scanning.current) return;
+    scanning.current = true;
+    toast(t("toast.rescanning"));
+    try {
+      await api.rescan();
+      reloadLyrics();
+      await refresh();
+      toast(t("toast.rescanned"));
+    } catch (error) {
+      say(error);
+    } finally {
+      scanning.current = false;
+    }
+  }, [refresh, reloadLyrics, say, t, toast]);
 
   const addMusic = useCallback(async (kind: "directory" | "file") => {
     try {
@@ -979,7 +1004,7 @@ function useModel() {
 
   useEffect(() => {
     loadLyrics(shown ?? undefined);
-  }, [shown, loadLyrics]);
+  }, [shown, loadLyrics, lyricsEpoch]);
 
   const findTracks = useCallback((text: string, scope: "all" | "queue" | string) => {
     if (scope === "queue") {
@@ -1051,6 +1076,7 @@ function useModel() {
     toggleMute,
     setSetting,
     importPaths,
+    rescan,
     addMusic,
     like,
     addToPlaylist,

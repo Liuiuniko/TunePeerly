@@ -131,16 +131,7 @@ export function SettingsPage() {
           <button type="button" className="btn soft" onClick={() => void app.addMusic("file")}>
             <Icons.music /> {t("library.addFiles")}
           </button>
-          <button
-            type="button"
-            className="btn ghost"
-            onClick={() =>
-              void api
-                .rescan()
-                .then(() => app.toast(t("toast.rescanned")))
-                .catch(app.say)
-            }
-          >
+          <button type="button" className="btn ghost" onClick={() => void app.rescan()}>
             <Icons.sync /> {t("library.rescan")}
           </button>
         </div>

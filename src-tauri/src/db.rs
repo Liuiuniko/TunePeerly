@@ -94,6 +94,8 @@ impl Db {
     fn migrate(&self) -> AppResult<()> {
         self.conn.execute_batch(SCHEMA)?;
         self.add_column_if_missing("local_files", "cover_checked", "INTEGER NOT NULL DEFAULT 0")?;
+        // Time and size of the `.lrc` next to the song, so a lyrics file added later is noticed.
+        self.add_column_if_missing("local_files", "lyrics_stamp", "TEXT")?;
         self.add_column_if_missing("peers", "trust", "TEXT NOT NULL DEFAULT 'full'")?;
         self.add_column_if_missing("notices", "read", "INTEGER NOT NULL DEFAULT 1")?;
         self.add_column_if_missing("notices", "pinned", "INTEGER NOT NULL DEFAULT 0")?;
@@ -308,7 +310,10 @@ impl Db {
         Ok(id)
     }
 
-    pub fn delete_grant(&self, id: i64) -> AppResult<Option<GrantRow>> {
+    /// With `keep_tracks`, the songs stay in the library with their tags, lyrics, covers, favorites,
+    /// playlist entries and history, marked unavailable. They rejoin a folder that is added again.
+    /// Without it, every song of the grant is dropped.
+    pub fn delete_grant(&self, id: i64, keep_tracks: bool) -> AppResult<Option<GrantRow>> {
         let grant = self
             .conn
             .query_row(
@@ -325,15 +330,29 @@ impl Db {
             )
             .optional()?;
         if grant.is_some() {
+            // A song that another folder also covers is already in the library through that folder.
             let ids: Vec<String> = {
-                let mut stmt = self
-                    .conn
-                    .prepare("SELECT local_file_id FROM local_files WHERE grant_id = ?1")?;
+                let mut stmt = self.conn.prepare(if keep_tracks {
+                    "SELECT a.local_file_id FROM local_files a
+                     WHERE a.grant_id = ?1 AND EXISTS (
+                        SELECT 1 FROM local_files b
+                        WHERE b.grant_id IS NOT NULL AND b.grant_id != ?1 AND b.absolute_path = a.absolute_path)"
+                } else {
+                    "SELECT local_file_id FROM local_files WHERE grant_id = ?1"
+                })?;
                 let rows = stmt.query_map(params![id], |row| row.get(0))?;
                 rows.collect::<Result<Vec<_>, _>>()?
             };
             for file_id in ids {
                 self.delete_local_file_record(&file_id)?;
+            }
+            if keep_tracks {
+                self.conn.execute(
+                    "UPDATE local_files
+                     SET grant_id = NULL, access_status = 'missing', access_reason = 'file.folderRemoved'
+                     WHERE grant_id = ?1",
+                    params![id],
+                )?;
             }
             self.conn
                 .execute("DELETE FROM grants WHERE id = ?1", params![id])?;
@@ -341,7 +360,7 @@ impl Db {
         Ok(grant)
     }
 
-    fn delete_local_file_record(&self, local_file_id: &str) -> AppResult<()> {
+    pub(crate) fn delete_local_file_record(&self, local_file_id: &str) -> AppResult<()> {
         // A hashed row is identified by its content, so it outlives the file. Only unhashed rows go with the file.
         self.conn.execute(
             "DELETE FROM favorites WHERE local_file_id = ?1 AND content_id IS NULL",

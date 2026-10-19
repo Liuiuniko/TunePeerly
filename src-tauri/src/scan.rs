@@ -51,6 +51,7 @@ struct ExistingRow {
     mtime_ms: Option<i64>,
     size_bytes: Option<i64>,
     exposed: i64,
+    lyrics_stamp: Option<String>,
 }
 
 struct Prepared {
@@ -59,6 +60,9 @@ struct Prepared {
     mtime_ms: i64,
     size: i64,
     tags: Option<TagRead>,
+    /// Set when only the lyrics file changed. The song itself is untouched.
+    lyrics: Option<String>,
+    lyrics_stamp: String,
     /// The directory entry exists, but its size and time could not be read.
     unreadable: bool,
 }
@@ -79,6 +83,7 @@ pub fn import_path(db: &Arc<Mutex<Db>>, path: &Path, kind: &str) -> AppResult<Im
     let (grant_id, existing) = {
         let guard = db.lock().expect("db");
         let grant_id = guard.insert_grant(kind, &path_text)?;
+        adopt_orphans(&guard, grant_id, path, kind == "directory")?;
         (grant_id, existing_rows(&guard, grant_id)?)
     };
     let mut files = Vec::new();
@@ -125,9 +130,77 @@ pub fn import_path(db: &Arc<Mutex<Db>>, path: &Path, kind: &str) -> AppResult<Im
     }
 }
 
+/// Songs left behind by a removed folder rejoin the folder they lie under. They keep their ids,
+/// so favorites, playlists, history, tags and covers are still attached when the files are seen again.
+fn adopt_orphans(db: &Db, grant_id: i64, root: &Path, root_is_dir: bool) -> AppResult<()> {
+    let orphans: Vec<(String, String)> = {
+        let mut stmt = db
+            .conn
+            .prepare("SELECT local_file_id, absolute_path FROM local_files WHERE grant_id IS NULL")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if orphans.is_empty() {
+        return Ok(());
+    }
+    let mut taken: HashSet<String> = {
+        let mut stmt = db.conn.prepare("SELECT relative_path FROM local_files WHERE grant_id = ?1")?;
+        let rows = stmt.query_map(params![grant_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<HashSet<_>, _>>()?
+    };
+    for (local_file_id, absolute) in orphans {
+        let file = Path::new(&absolute);
+        let relative = if root_is_dir {
+            relative_under(root, file)
+        } else if same_path(root, file) {
+            file.file_name().map(|name| name.to_string_lossy().to_string())
+        } else {
+            None
+        };
+        let Some(relative) = relative else { continue };
+        if taken.contains(&relative) {
+            // The folder already has this file under another id.
+            db.delete_local_file_record(&local_file_id)?;
+            continue;
+        }
+        db.conn.execute(
+            "UPDATE local_files SET grant_id = ?1, relative_path = ?2 WHERE local_file_id = ?3",
+            params![grant_id, relative, local_file_id],
+        )?;
+        taken.insert(relative);
+    }
+    Ok(())
+}
+
+fn path_parts(path: &Path) -> Vec<String> {
+    path.components().map(|part| part.as_os_str().to_string_lossy().to_lowercase()).collect()
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    path_parts(a) == path_parts(b)
+}
+
+/// The part of `file` below `root`. Windows paths ignore letter case.
+fn relative_under(root: &Path, file: &Path) -> Option<String> {
+    let root_parts = path_parts(root);
+    let mut file_parts = file.components();
+    for part in &root_parts {
+        let next = file_parts.next()?;
+        if &next.as_os_str().to_string_lossy().to_lowercase() != part {
+            return None;
+        }
+    }
+    let rest: PathBuf = file_parts.collect();
+    if rest.as_os_str().is_empty() {
+        None
+    } else {
+        Some(rest.to_string_lossy().to_string())
+    }
+}
+
 fn existing_rows(db: &Db, grant_id: i64) -> AppResult<HashMap<String, ExistingRow>> {
     let mut stmt = db.conn.prepare(
-        "SELECT relative_path, local_file_id, content_id, mtime_ms, size_bytes, exposed
+        "SELECT relative_path, local_file_id, content_id, mtime_ms, size_bytes, exposed, lyrics_stamp
          FROM local_files WHERE grant_id = ?1",
     )?;
     let rows = stmt.query_map(params![grant_id], |row| {
@@ -139,6 +212,7 @@ fn existing_rows(db: &Db, grant_id: i64) -> AppResult<HashMap<String, ExistingRo
                 mtime_ms: row.get(3)?,
                 size_bytes: row.get(4)?,
                 exposed: row.get(5)?,
+                lyrics_stamp: row.get(6)?,
             },
         ))
     })?;
@@ -198,6 +272,8 @@ fn prepare_one(
                 mtime_ms: 0,
                 size: 0,
                 tags: None,
+                lyrics: None,
+                lyrics_stamp: String::new(),
                 unreadable: true,
             });
         }
@@ -209,15 +285,19 @@ fn prepare_one(
         .map(|time| time.as_millis() as i64)
         .unwrap_or(0);
     let size = meta.len() as i64;
-    let unchanged = existing
-        .get(&relative)
-        .is_some_and(|row| row.mtime_ms == Some(mtime_ms) && row.size_bytes == Some(size));
+    let previous = existing.get(&relative);
+    let unchanged = previous.is_some_and(|row| row.mtime_ms == Some(mtime_ms) && row.size_bytes == Some(size));
+    // The `.lrc` is a separate file, so the song's own time and size say nothing about it.
+    let lyrics_stamp = sidecar_stamp(file);
+    let lyrics_stale = unchanged && previous.is_some_and(|row| row.lyrics_stamp.as_deref().unwrap_or("") != lyrics_stamp);
     Some(Prepared {
         relative,
         absolute: file.to_path_buf(),
         mtime_ms,
         size,
         tags: if unchanged { None } else { Some(read_tags(file)) },
+        lyrics: if lyrics_stale { Some(read_lyrics(file)) } else { None },
+        lyrics_stamp,
         unreadable: false,
     })
 }
@@ -250,6 +330,20 @@ fn write_prepared(
                      WHERE local_file_id = ?2",
                     params![item.absolute.to_string_lossy(), row.local_file_id],
                 )?;
+                if let Some(lyrics) = &item.lyrics {
+                    db.conn.execute(
+                        "UPDATE local_files SET lyrics = ?1, lyrics_stamp = ?2 WHERE local_file_id = ?3",
+                        params![lyrics, item.lyrics_stamp, row.local_file_id],
+                    )?;
+                    let (title, artist): (String, String) = db.conn.query_row(
+                        "SELECT COALESCE(title, ''), COALESCE(artist, '') FROM local_files WHERE local_file_id = ?1",
+                        params![row.local_file_id],
+                        |found| Ok((found.get(0)?, found.get(1)?)),
+                    )?;
+                    let folder = item.absolute.parent().map(|dir| dir.to_string_lossy().to_string()).unwrap_or_default();
+                    index_fts(db, &row.local_file_id, row.content_id.as_deref(), &title, &artist, lyrics, &folder)?;
+                    updated += 1;
+                }
             }
             continue;
         };
@@ -273,8 +367,8 @@ fn write_prepared(
                 metadata_status, metadata_reason, access_status, access_reason,
                 playback_status, playback_reason, exposed, added_at, mtime_ms, size_bytes,
                 content_id, duration_ms, title, artist, album, track_number, codec,
-                sample_rate, bit_depth, video, cover_path, cover_checked
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'available',NULL,'untried',NULL,?9,?10,?11,?12,NULL,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,0)
+                sample_rate, bit_depth, video, cover_path, cover_checked, lyrics_stamp
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'available',NULL,'untried',NULL,?9,?10,?11,?12,NULL,?13,?14,?15,?16,?17,?18,?19,?20,?21,NULL,0,?22)
              ON CONFLICT(local_file_id) DO UPDATE SET
                 absolute_path = excluded.absolute_path,
                 file_name = excluded.file_name,
@@ -298,7 +392,8 @@ fn write_prepared(
                 bit_depth = excluded.bit_depth,
                 video = excluded.video,
                 cover_path = NULL,
-                cover_checked = 0",
+                cover_checked = 0,
+                lyrics_stamp = excluded.lyrics_stamp",
             params![
                 local_file_id,
                 grant_id,
@@ -321,6 +416,7 @@ fn write_prepared(
                 read.sample_rate,
                 read.bit_depth,
                 video,
+                item.lyrics_stamp,
             ],
         )?;
         index_fts(db, &local_file_id, None, &title, &read.artist, &read.lyrics, &folder)?;
@@ -527,10 +623,44 @@ fn read_tags(path: &Path) -> TagRead {
     read
 }
 
-fn sidecar_lyrics(path: &Path) -> String {
+fn sidecar_path(path: &Path) -> PathBuf {
     let mut lrc = path.to_path_buf();
     lrc.set_extension("lrc");
-    fs::read_to_string(lrc).unwrap_or_default()
+    lrc
+}
+
+fn sidecar_lyrics(path: &Path) -> String {
+    let Ok(bytes) = fs::read(sidecar_path(path)) else { return String::new() };
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    String::from_utf8(bytes.to_vec()).unwrap_or_default()
+}
+
+/// Modified time and size of the `.lrc` next to a song. Empty when there is none.
+fn sidecar_stamp(path: &Path) -> String {
+    let Ok(meta) = fs::metadata(sidecar_path(path)) else { return String::new() };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|time| time.as_millis())
+        .unwrap_or(0);
+    format!("{mtime}:{}", meta.len())
+}
+
+/// The `.lrc` next to the song, or else the lyrics inside its tag.
+fn read_lyrics(path: &Path) -> String {
+    let side = sidecar_lyrics(path);
+    if !side.is_empty() {
+        return side;
+    }
+    Probe::open(path)
+        .and_then(|probe| probe.read())
+        .ok()
+        .and_then(|tagged| {
+            let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+            tag.get_string(&ItemKey::Lyrics).map(|text| text.to_string())
+        })
+        .unwrap_or_default()
 }
 
 fn container_has_video(path: &Path) -> bool {
@@ -852,7 +982,8 @@ pub fn refresh_access(db: &Db) -> AppResult<()> {
     let files: Vec<(String, String)> = {
         let mut stmt = db
             .conn
-            .prepare("SELECT local_file_id, absolute_path FROM local_files")?;
+            // Songs of a removed folder stay unavailable, whether or not their files still exist.
+            .prepare("SELECT local_file_id, absolute_path FROM local_files WHERE grant_id IS NOT NULL")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
@@ -925,4 +1056,80 @@ pub fn finish_cover(db: &Db, local_file_id: &str, cover: Option<&str>) -> AppRes
         params![cover, local_file_id],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tunepeerly-{name}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn open_db() -> (Arc<Mutex<Db>>, PathBuf) {
+        let root = temp("db");
+        let db = Db::open(&root.join("library.db"), root.clone(), root.join("cache")).unwrap();
+        (Arc::new(Mutex::new(db)), root)
+    }
+
+    fn lyrics_of(db: &Arc<Mutex<Db>>) -> (String, String, String) {
+        db.lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT local_file_id, COALESCE(lyrics, ''), access_status FROM local_files",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn removed_folder_keeps_songs_and_readding_restores_them() {
+        let (db, _keep) = open_db();
+        let music = temp("music");
+        fs::write(music.join("a.mp3"), b"not really audio").unwrap();
+        let first = import_path(&db, &music, "directory").unwrap();
+        let (id, _, status) = lyrics_of(&db);
+        assert_eq!(status, "available");
+
+        db.lock().unwrap().delete_grant(first.grant_id, true).unwrap();
+        let (kept, _, status) = lyrics_of(&db);
+        assert_eq!(kept, id);
+        assert_eq!(status, "missing");
+        scan_refresh(&db);
+        assert_eq!(lyrics_of(&db).2, "missing");
+
+        import_path(&db, &music, "directory").unwrap();
+        let (again, _, status) = lyrics_of(&db);
+        assert_eq!(again, id);
+        assert_eq!(status, "available");
+    }
+
+    #[test]
+    fn lyrics_added_later_are_picked_up_by_a_rescan() {
+        let (db, _keep) = open_db();
+        let music = temp("lyrics");
+        fs::write(music.join("a.mp3"), b"not really audio").unwrap();
+        import_path(&db, &music, "directory").unwrap();
+        assert_eq!(lyrics_of(&db).1, "");
+
+        fs::write(music.join("a.lrc"), "[00:01.00]hello").unwrap();
+        import_path(&db, &music, "directory").unwrap();
+        assert_eq!(lyrics_of(&db).1, "[00:01.00]hello");
+
+        fs::write(music.join("a.lrc"), "[00:01.00]hello again").unwrap();
+        import_path(&db, &music, "directory").unwrap();
+        assert_eq!(lyrics_of(&db).1, "[00:01.00]hello again");
+
+        fs::remove_file(music.join("a.lrc")).unwrap();
+        import_path(&db, &music, "directory").unwrap();
+        assert_eq!(lyrics_of(&db).1, "");
+    }
+
+    fn scan_refresh(db: &Arc<Mutex<Db>>) {
+        refresh_access(&db.lock().unwrap()).unwrap();
+    }
 }
