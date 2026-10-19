@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Link } from "../api";
 import { useApp } from "../app/model";
-import { CommitInput, Row, Select } from "../components/controls";
+import { CommitInput, Revise, Row, Select } from "../components/controls";
 import { Icons } from "../ui/icons";
 
 function ipv4(text: string): boolean {
@@ -99,7 +99,7 @@ export function DevicesPage() {
       </section>
 
       <section className="panel">
-        <h2>{t("devices.paired")}</h2>
+        <h2>{t("devices.paired")}<Revise /></h2>
         {boot.links.length === 0 ? (
           <p className="muted">{t("devices.noPaired")}</p>
         ) : (
@@ -153,6 +153,7 @@ export function DevicesPage() {
       <section className="panel">
         <h2>
           {t("devices.nearby")}
+          <Revise />
           {settings.discovery && !networkOff && <span className="scanning" aria-hidden="true" />}
         </h2>
         {!settings.discovery ? (
@@ -197,7 +198,7 @@ export function DevicesPage() {
       </section>
 
       <section className="panel">
-        <h2>{t("devices.manual")}</h2>
+        <h2>{t("devices.manual")}<Revise /></h2>
         <p className="setting-help">{t("devices.manualHelp")}</p>
         <form
           className="manual-form"

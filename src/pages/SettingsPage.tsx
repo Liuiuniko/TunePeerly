@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, pickFolder, type BlockFlags, type Feature, type Grant } from "../api";
 import { useApp } from "../app/model";
-import { CommitInput, Row, Segmented, Select, Switch } from "../components/controls";
+import { CommitInput, DoNotUse, NotImplemented, Revise, Row, Segmented, Select, Switch } from "../components/controls";
 import { SyncButton } from "../components/SyncButton";
 import { problemGroups } from "../lib/library";
 import { Icons } from "../ui/icons";
@@ -180,7 +180,7 @@ export function SettingsPage() {
             }}
           />
         </Row>
-        <Row title={t("settings.historySync")} help={t("settings.historySyncHelp")}>
+        <Row title={<span className="setting-title-line">{t("settings.historySync")}<Revise /></span>} help={t("settings.historySyncHelp")}>
           <Switch
             label={t("settings.historySync")}
             checked={Boolean(settings.historySync)}
@@ -192,7 +192,7 @@ export function SettingsPage() {
             }}
           />
         </Row>
-        <Row title={t("settings.historyStartup")} help={t("settings.historyStartupHelp")}>
+        <Row title={<span className="setting-title-line">{t("settings.historyStartup")}<Revise /></span>} help={t("settings.historyStartupHelp")}>
           <Switch
             label={t("settings.historyStartup")}
             checked={Boolean(settings.historySync && settings.historyStartup)}
@@ -221,7 +221,7 @@ export function SettingsPage() {
             }}
           />
         </Row>
-        <Row title={t("settings.conflictPolicy")} help={t("settings.conflictPolicyHelp")}>
+        <Row title={<span className="setting-title-line">{t("settings.conflictPolicy")}<Revise /></span>} help={t("settings.conflictPolicyHelp")}>
           <Select
             label={t("settings.conflictPolicy")}
             value={settings.conflictPolicy === "keep" || settings.conflictPolicy === "take" ? settings.conflictPolicy : "ask"}
@@ -273,7 +273,7 @@ export function SettingsPage() {
         <Row title={t("settings.discovery")} help={t("settings.discoveryHelp")}>
           <Switch label={t("settings.discovery")} checked={Boolean(settings.discovery)} onChange={(value) => set("discovery", value)} />
         </Row>
-        <Row title={t("settings.autoSend")} help={t("settings.autoSendHelp")}>
+        <Row title={<span className="setting-title-line">{t("settings.autoSend")}<Revise /></span>} help={t("settings.autoSendHelp")}>
           <div className="chip-row">
             {FEATURES.map((feature) => {
               const on = Boolean(settings.autoSend?.[feature]);
@@ -291,7 +291,7 @@ export function SettingsPage() {
             })}
           </div>
         </Row>
-        <Row title={t("settings.positionSync")} help={t("settings.positionSyncHelp")}>
+        <Row title={<span className="setting-title-line">{t("settings.positionSync")}<DoNotUse /></span>} help={t("settings.positionSyncHelp")}>
           <Select
             label={t("settings.positionSync")}
             value={String(settings.positionSyncDevice ?? "")}
@@ -305,7 +305,7 @@ export function SettingsPage() {
             ]}
           />
         </Row>
-        <h3>{t("settings.relay")}</h3>
+        <h3><span className="setting-title-line">{t("settings.relay")}<NotImplemented /></span></h3>
         <p className="setting-help">
           {t("settings.relayHelp")} <span className={`state-pill ${relay.tone}`}>{relay.text}</span>
         </p>
@@ -334,7 +334,7 @@ export function SettingsPage() {
       </section>
 
       <section className="panel" ref={(node) => { refs.current.sync = node; }}>
-        <h2>{t("settings.sync")}</h2>
+        <h2>{t("settings.sync")}<Revise /></h2>
         <p className="setting-help">{t("settings.syncHelp")}</p>
         <Row title={t("settings.requestDevice")} help={t("settings.requestDeviceHelp")}>
           <Select
@@ -376,7 +376,7 @@ export function SettingsPage() {
           </button>
         </Row>
         <Row
-          title={t("settings.lanPort")}
+          title={<span className="setting-title-line">{t("settings.lanPort")}<Revise /></span>}
           help={
             <>
               <div>{t("settings.lanPortHelp", { port: boot.listenPort || "—" })}</div>
@@ -399,7 +399,7 @@ export function SettingsPage() {
             }}
           />
         </Row>
-        <Row title={t("settings.deviceId")}>
+        <Row title={<span className="setting-title-line">{t("settings.deviceId")}<Revise /></span>}>
           <code className="mono small selectable">{boot.certId}</code>
         </Row>
       </section>

@@ -1,6 +1,22 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 import { Icons } from "../ui/icons";
+
+export function Revise() {
+  const { t } = useTranslation();
+  return <span className="setting-mark">{t("settings.revise")}</span>;
+}
+
+export function DoNotUse() {
+  const { t } = useTranslation();
+  return <span className="setting-mark danger">{t("settings.doNotUse")}</span>;
+}
+
+export function NotImplemented() {
+  const { t } = useTranslation();
+  return <span className="setting-mark">{t("settings.notImplemented")}</span>;
+}
 
 export function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled?: boolean }) {
   return (
