@@ -26,20 +26,6 @@ export function Cover({ src, className = "", round, icon = "music" }: CoverProps
   );
 }
 
-/** Playlist cover: the first four covers as a 2x2 grid, or one cover, or a placeholder. */
-export function Collage({ covers, className = "" }: { covers: string[]; className?: string }) {
-  if (covers.length >= 4) {
-    return (
-      <div className={`cover collage ${className}`}>
-        {covers.slice(0, 4).map((item) => (
-          <img key={item} src={coverSrc(item)} alt="" loading="lazy" draggable={false} />
-        ))}
-      </div>
-    );
-  }
-  return <Cover src={covers[0]} className={className} />;
-}
-
 export function LikedCover({ className = "" }: { className?: string }) {
   return (
     <div className={`cover liked-cover ${className}`}>

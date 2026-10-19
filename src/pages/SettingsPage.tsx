@@ -1,18 +1,33 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, pickFolder, type BlockFlags, type Feature, type Grant } from "../api";
 import { useApp } from "../app/model";
 import { CommitInput, Row, Segmented, Select, Switch } from "../components/controls";
+import { SyncButton } from "../components/SyncButton";
 import { problemGroups } from "../lib/library";
 import { Icons } from "../ui/icons";
 import { relayLabel } from "./DevicesPage";
 
-const FEATURES: Feature[] = ["favorites", "playlists", "queue", "history", "theme", "language"];
-const BLOCKS = ["manual", "source", "timestamp", "all"] as const;
+const SOURCE_URL = "https://github.com/zhebuilds/TunePeerly";
+const LICENSE_URL = "https://www.gnu.org/licenses/agpl-3.0.html";
+const FALLBACK_VERSION = "0.6.0";
+
+function openLink(url: string) {
+  if ("__TAURI_INTERNALS__" in window) {
+    void import("@tauri-apps/plugin-opener")
+      .then(({ openUrl }) => openUrl(url))
+      .catch(() => {});
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+const FEATURES: Feature[] = ["favorites", "playlists", "appearance"];
+const BLOCKS = ["manual", "source", "all"] as const;
 type BlockKey = (typeof BLOCKS)[number];
 
-function appliesTo(feature: Feature, block: BlockKey): boolean {
-  return block !== "timestamp" || feature === "history";
+function appliesTo(_feature: Feature, _block: BlockKey): boolean {
+  return true;
 }
 
 export function SettingsPage() {
@@ -20,6 +35,11 @@ export function SettingsPage() {
   const app = useApp();
   const boot = app.boot;
   const refs = useRef<Record<string, HTMLElement | null>>({});
+  useEffect(() => {
+    if (app.route.name === "settings" && app.route.id) {
+      refs.current[app.route.id]?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [app.route.name, app.route.id]);
   if (!boot) return null;
   const settings = app.settings;
   const set = (key: string, value: unknown) => void app.setSetting(key, value);
@@ -31,9 +51,11 @@ export function SettingsPage() {
     { id: "appearance", label: t("settings.appearance") },
     { id: "library", label: t("settings.library") },
     { id: "history", label: t("settings.history") },
+    { id: "notices", label: t("settings.notices") },
     { id: "network", label: t("settings.network") },
     { id: "sync", label: t("settings.sync") },
     { id: "storage", label: t("settings.storage") },
+    { id: "about", label: t("settings.about") },
   ];
 
   return (
@@ -48,15 +70,33 @@ export function SettingsPage() {
       </nav>
 
       <section className="panel" ref={(node) => { refs.current.appearance = node; }}>
-        <h2>{t("settings.appearance")}</h2>
+        <div className="panel-head">
+          <h2>{t("settings.appearance")}</h2>
+          <SyncButton feature="appearance" compact />
+        </div>
         <Row title={t("settings.theme")}>
           <Segmented
             label={t("settings.theme")}
-            value={boot.theme === "dark" ? "dark" : "light"}
+            value={boot.theme === "light" ? "light" : "dark"}
             onChange={(value) => set("theme", value)}
             options={[
               { value: "light", label: t("settings.light"), icon: <Icons.sun /> },
               { value: "dark", label: t("settings.dark"), icon: <Icons.moon /> },
+            ]}
+          />
+        </Row>
+        <Row title={t("settings.miniPlayer")} help={t("settings.miniPlayerHelp")}>
+          <Switch label={t("settings.miniPlayer")} checked={Boolean(settings.miniPlayer)} onChange={(value) => set("miniPlayer", value)} />
+        </Row>
+        <Row title={t("settings.closeWindow")} help={t("settings.closeWindowHelp")}>
+          <Segmented
+            label={t("settings.closeWindow")}
+            value={settings.closeAction === "tray" || settings.closeAction === "quit" ? String(settings.closeAction) : "ask"}
+            onChange={(value) => set("closeAction", value === "ask" ? "" : value)}
+            options={[
+              { value: "ask", label: t("settings.closeAsk") },
+              { value: "tray", label: t("settings.closeTray") },
+              { value: "quit", label: t("settings.closeQuit") },
             ]}
           />
         </Row>
@@ -111,8 +151,8 @@ export function SettingsPage() {
             value={settings.exposeDefault === "expose" ? "expose" : "hide"}
             onChange={(value) => set("exposeDefault", value)}
             options={[
-              { value: "hide", label: t("exposure.hideDefault") },
-              { value: "expose", label: t("exposure.exposeDefault") },
+              { value: "hide", label: t("exposure.hideDefault"), hint: t("exposure.hideDefaultHint") },
+              { value: "expose", label: t("exposure.exposeDefault"), hint: t("exposure.exposeDefaultHint") },
             ]}
           />
         </Row>
@@ -139,20 +179,86 @@ export function SettingsPage() {
             }}
           />
         </Row>
-        <Row title={t("settings.historyMode")} help={t(`settings.historyModeHelp.${settings.historySyncMode ?? "utc"}`)}>
-          <Segmented
-            label={t("settings.historyMode")}
-            value={settings.historySyncMode ?? "utc"}
-            onChange={(value) => set("historySyncMode", value)}
-            options={[
-              { value: "utc", label: t("settings.historyUtc") },
-              { value: "overwrite", label: t("settings.historyOverwrite") },
-              { value: "follow", label: t("settings.historyFollow") },
-            ]}
+        <Row title={t("settings.historySync")} help={t("settings.historySyncHelp")}>
+          <Switch
+            label={t("settings.historySync")}
+            checked={Boolean(settings.historySync)}
+            onChange={(value) => {
+              void app.setSetting("historySync", value).then(() => {
+                if (!value) void app.setSetting("historyStartup", false);
+                else void api.network("sync", { feature: "history", refresh: true }).catch(() => {});
+              });
+            }}
           />
+        </Row>
+        <Row title={t("settings.historyStartup")} help={t("settings.historyStartupHelp")}>
+          <Switch
+            label={t("settings.historyStartup")}
+            checked={Boolean(settings.historySync && settings.historyStartup)}
+            disabled={!settings.historySync}
+            onChange={(value) => set("historyStartup", value)}
+          />
+        </Row>
+        <Row title={t("settings.historyPause")} help={t("settings.historyPauseHelp")}>
+          <Switch label={t("settings.historyPause")} checked={Boolean(settings.historyPaused)} onChange={(value) => set("historyPaused", value)} />
         </Row>
         <Row title={t("settings.incognito")} help={t("settings.incognitoHelp")}>
           <Switch label={t("settings.incognito")} checked={Boolean(settings.incognito)} onChange={(value) => set("incognito", value)} />
+        </Row>
+        <Row title={t("settings.silence")} help={t("settings.silenceHelp")}>
+          <CommitInput
+            label={t("settings.silence")}
+            value={String(settings.silenceSeconds ?? 60)}
+            width={120}
+            onCommit={(value) => {
+              const seconds = Number(value);
+              if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) {
+                app.say(t("settings.silenceInvalid"));
+                return;
+              }
+              void app.setSetting("silenceSeconds", seconds);
+            }}
+          />
+        </Row>
+        <Row title={t("settings.conflictPolicy")} help={t("settings.conflictPolicyHelp")}>
+          <Select
+            label={t("settings.conflictPolicy")}
+            value={settings.conflictPolicy === "keep" || settings.conflictPolicy === "take" ? settings.conflictPolicy : "ask"}
+            onChange={(value) => set("conflictPolicy", value)}
+            options={[
+              { value: "ask", label: t("settings.conflictAsk") },
+              { value: "keep", label: t("settings.conflictKeep") },
+              { value: "take", label: t("settings.conflictTake") },
+            ]}
+          />
+        </Row>
+      </section>
+
+      <section className="panel" ref={(node) => { refs.current.notices = node; }}>
+        <h2>{t("settings.notices")}</h2>
+        <Row title={t("settings.noticeRead")} help={t("settings.noticeReadHelp")}>
+          <Select
+            label={t("settings.noticeRead")}
+            value={settings.noticeRead === "open" || settings.noticeRead === "click" ? settings.noticeRead : "visible"}
+            onChange={(value) => set("noticeRead", value)}
+            options={[
+              { value: "visible", label: t("settings.noticeReadVisible") },
+              { value: "open", label: t("settings.noticeReadOpen") },
+              { value: "click", label: t("settings.noticeReadClick") },
+            ]}
+          />
+        </Row>
+        <Row title={t("settings.noticeClear")} help={t("settings.noticeClearHelp")}>
+          <Select
+            label={t("settings.noticeClear")}
+            value={settings.noticeClear === "unpinned" || settings.noticeClear === "all" ? settings.noticeClear : "ask"}
+            onChange={(value) => set("noticeClear", value)}
+            options={[
+              { value: "ask", label: t("settings.noticeClearAsk") },
+              { value: "unpinned", label: t("settings.noticeClearUnpinned") },
+              { value: "all", label: t("settings.noticeClearAll") },
+            ]}
+          />
         </Row>
       </section>
 
@@ -166,14 +272,37 @@ export function SettingsPage() {
         <Row title={t("settings.discovery")} help={t("settings.discoveryHelp")}>
           <Switch label={t("settings.discovery")} checked={Boolean(settings.discovery)} onChange={(value) => set("discovery", value)} />
         </Row>
-        <Row title={t("settings.syncEnabled")} help={t("settings.syncEnabledHelp")}>
-          <Switch label={t("settings.syncEnabled")} checked={Boolean(settings.syncEnabled)} onChange={(value) => set("syncEnabled", value)} />
-        </Row>
-        <Row title={t("settings.audioShare")} help={t("settings.audioShareHelp")}>
-          <Switch label={t("settings.audioShare")} checked={Boolean(settings.audioShare)} onChange={(value) => set("audioShare", value)} />
+        <Row title={t("settings.autoSend")} help={t("settings.autoSendHelp")}>
+          <div className="chip-row">
+            {FEATURES.map((feature) => {
+              const on = Boolean(settings.autoSend?.[feature]);
+              return (
+                <button
+                  key={feature}
+                  type="button"
+                  className={`chip small${on ? " on" : ""}`}
+                  aria-pressed={on}
+                  onClick={() => set("autoSend", { ...(settings.autoSend ?? {}), [feature]: !on })}
+                >
+                  {t(`feature.${feature}`)}
+                </button>
+              );
+            })}
+          </div>
         </Row>
         <Row title={t("settings.positionSync")} help={t("settings.positionSyncHelp")}>
-          <Switch label={t("settings.positionSync")} checked={Boolean(settings.positionSync)} onChange={(value) => set("positionSync", value)} />
+          <Select
+            label={t("settings.positionSync")}
+            value={String(settings.positionSyncDevice ?? "")}
+            disabled={Boolean(settings.incognito)}
+            onChange={(value) => set("positionSyncDevice", value)}
+            options={[
+              { value: "", label: t("settings.positionSyncOff") },
+              ...boot.links
+                .filter((link) => link.deviceId !== boot.deviceId && (link.state === "online" || link.deviceId === settings.positionSyncDevice))
+                .map((link) => ({ value: link.deviceId, label: link.name || link.deviceId })),
+            ]}
+          />
         </Row>
         <h3>{t("settings.relay")}</h3>
         <p className="setting-help">
@@ -206,11 +335,25 @@ export function SettingsPage() {
       <section className="panel" ref={(node) => { refs.current.sync = node; }}>
         <h2>{t("settings.sync")}</h2>
         <p className="setting-help">{t("settings.syncHelp")}</p>
-        {!settings.syncEnabled && (
-          <div className="banner">
-            <Icons.info /> <span>{t("settings.syncOffNote")}</span>
-          </div>
-        )}
+        <Row title={t("settings.requestDevice")} help={t("settings.requestDeviceHelp")}>
+          <Select
+            label={t("settings.requestDevice")}
+            value={String(settings.syncRequestDevice ?? "")}
+            onChange={(value) => set("syncRequestDevice", value)}
+            options={[{ value: "", label: t("sync.requestNone") }, ...boot.links.map((link) => ({ value: link.deviceId, label: link.name || link.deviceId }))]}
+          />
+        </Row>
+        <Row title={t("settings.overwriteMode")} help={t("settings.overwriteModeHelp")}>
+          <Select
+            label={t("settings.overwriteMode")}
+            value={settings.overwriteMode === "ask" ? "ask" : "silent"}
+            onChange={(value) => set("overwriteMode", value)}
+            options={[
+              { value: "silent", label: t("devices.overwriteSilent") },
+              { value: "ask", label: t("devices.overwriteAsk") },
+            ]}
+          />
+        </Row>
         <SyncTable />
       </section>
 
@@ -231,38 +374,27 @@ export function SettingsPage() {
             <Icons.folder /> {t("common.choose")}
           </button>
         </Row>
-        <Row title={t("settings.databasePath")} help={t("settings.restartHelp")}>
-          <CommitInput
-            label={t("settings.databasePath")}
-            width={360}
-            value={boot.config.database_path}
-            onCommit={(value) =>
-              void api
-                .updateConfig(value.trim(), boot.config.listen_port)
-                .then(() => {
-                  app.toast(t("toast.restartNeeded"));
-                  app.scheduleRefresh();
-                })
-                .catch(app.say)
-            }
-          />
-        </Row>
-        <Row title={t("settings.lanPort")} help={t("settings.lanPortHelp", { port: boot.listenPort || "—" })}>
+        <Row
+          title={t("settings.lanPort")}
+          help={
+            <>
+              <div>{t("settings.lanPortHelp", { port: boot.listenPort || "—" })}</div>
+              {boot.portFallback ? <div className="setting-error">{t("settings.portFallback", { saved: boot.portFallback, port: boot.listenPort || "—" })}</div> : null}
+            </>
+          }
+        >
           <CommitInput
             label={t("settings.lanPort")}
             type="number"
             width={110}
-            value={String(boot.config.listen_port)}
+            value={String(settings.listenPort || "")}
             onCommit={(value) => {
               const port = Number(value);
-              if (!Number.isInteger(port) || port < 0 || port > 65535) {
+              if (!Number.isInteger(port) || port < 1024 || port > 65535) {
                 app.setNotice(t("settings.portInvalid"));
                 return;
               }
-              void api
-                .updateConfig(boot.config.database_path, port)
-                .then(() => app.scheduleRefresh())
-                .catch(app.say);
+              void app.setSetting("listenPort", port).then(() => app.scheduleRefresh());
             }}
           />
         </Row>
@@ -270,7 +402,61 @@ export function SettingsPage() {
           <code className="mono small selectable">{boot.certId}</code>
         </Row>
       </section>
+
+      <AboutPanel nodeRef={(node) => { refs.current.about = node; }} />
     </div>
+  );
+}
+
+function AboutPanel({ nodeRef }: { nodeRef: (node: HTMLElement | null) => void }) {
+  const { t } = useTranslation();
+  const [version, setVersion] = useState(FALLBACK_VERSION);
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let gone = false;
+    void import("@tauri-apps/api/app")
+      .then(({ getVersion }) => getVersion())
+      .then((value) => {
+        if (!gone && value) setVersion(value);
+      })
+      .catch(() => {});
+    return () => {
+      gone = true;
+    };
+  }, []);
+  return (
+    <section className="panel" ref={nodeRef}>
+      <h2>{t("settings.about")}</h2>
+      <div className="about-head">
+        <img className="about-icon" src="/favicon.png" alt="" />
+        <div>
+          <div className="about-name">{t("about.name")}</div>
+          <div className="about-version">{t("about.version", { version })}</div>
+        </div>
+      </div>
+      <p className="setting-help about-summary">{t("about.summary")}</p>
+      <Row title={t("about.license")} help={t("about.licenseHelp")}>
+        <button type="button" className="btn soft" onClick={() => openLink(LICENSE_URL)}>
+          {t("about.licenseName")} <Icons.external />
+        </button>
+      </Row>
+      <Row
+        title={t("about.source")}
+        help={
+          <>
+            <div className="mono selectable about-url">{SOURCE_URL}</div>
+            <div>{t("about.sourceNote")}</div>
+          </>
+        }
+      >
+        <button type="button" className="btn soft" onClick={() => openLink(SOURCE_URL)}>
+          {t("about.open")} <Icons.external />
+        </button>
+      </Row>
+      <Row title={t("about.author")} help={t("about.copyright")} />
+      <Row title={t("about.privacy")} help={t("about.privacyHelp")} />
+      <Row title={t("about.components")} help={t("about.componentsHelp")} />
+    </section>
   );
 }
 
@@ -295,15 +481,15 @@ function GrantRow({ grant }: { grant: Grant }) {
         value={grant.exposure}
         onChange={(value) => void api.setExposure("grant", String(grant.id), value).then(refresh).catch(app.say)}
         options={[
-          { value: "follow", label: t("exposure.follow") },
-          { value: "expose", label: t("exposure.expose") },
-          { value: "hide", label: t("exposure.hide") },
+          { value: "follow", label: t("exposure.follow"), hint: t("exposure.followHint") },
+          { value: "expose", label: t("exposure.expose"), hint: t("exposure.exposeHint") },
+          { value: "hide", label: t("exposure.hide"), hint: t("exposure.hideHint") },
         ]}
       />
-      <button type="button" className="icon-btn" title={t("exposure.exposeAll")} aria-label={t("exposure.exposeAll")} onClick={() => void api.exposeMembers("grant", String(grant.id), true).then(() => { app.toast(t("toast.exposed")); refresh(); }).catch(app.say)}>
+      <button type="button" className="icon-btn" title={`${t("exposure.exposeAll")}: ${t("exposure.exposeAllHint")}`} aria-label={t("exposure.exposeAll")} onClick={() => void api.exposeMembers("grant", String(grant.id), true).then(() => { app.toast(t("toast.exposed")); refresh(); }).catch(app.say)}>
         <Icons.eye />
       </button>
-      <button type="button" className="icon-btn" title={t("exposure.hideAll")} aria-label={t("exposure.hideAll")} onClick={() => void api.exposeMembers("grant", String(grant.id), false).then(() => { app.toast(t("toast.hidden")); refresh(); }).catch(app.say)}>
+      <button type="button" className="icon-btn" title={`${t("exposure.hideAll")}: ${t("exposure.hideAllHint")}`} aria-label={t("exposure.hideAll")} onClick={() => void api.exposeMembers("grant", String(grant.id), false).then(() => { app.toast(t("toast.hidden")); refresh(); }).catch(app.say)}>
         <Icons.eyeOff />
       </button>
       <button
@@ -335,8 +521,7 @@ function SyncTable() {
   const settings = app.settings;
   const sources = settings.syncSources ?? {};
   const blocks = settings.syncBlocks ?? {};
-  const online = boot.links.filter((link) => link.state === "online");
-  const disabled = !settings.syncEnabled || Boolean(settings.incognito);
+  const disabled = Boolean(settings.incognito);
 
   const setBlocks = (next: Partial<Record<string, BlockFlags>>) => void app.setSetting("syncBlocks", next);
   const flag = (feature: Feature, block: BlockKey) => Boolean(blocks[feature]?.[block]);
@@ -371,25 +556,13 @@ function SyncTable() {
     }
     setBlocks(next);
   };
-  const setSource = (feature: Feature, value: string) => void app.setSetting("syncSources", { ...sources, [feature]: value || null });
-
-  const send = (feature: Feature) => {
-    const source = sources[feature];
-    const refresh = Boolean(source && source !== boot.deviceId);
-    app.setDialog({
-      kind: "confirm",
-      title: t(refresh ? "sync.refreshTitle" : "sync.sendTitle", { feature: t(`feature.${feature}`) }),
-      body: t("sync.sendBody", { count: online.length }),
-      action: refresh ? t("sync.refresh") : t("sync.send"),
-      run: () => void api.network("sync", { feature, refresh }).then(() => app.toast(t("toast.synced"))).catch(app.say),
-    });
-  };
+  const setSource = (feature: Feature, value: string) => void app.setSetting("syncSources", { ...sources, [feature]: value || boot.deviceId });
 
   return (
     <div className={`sync-table${disabled ? " disabled" : ""}`}>
       <div className="sync-head">
         <span>{t("sync.feature")}</span>
-        <span>{t("sync.source")}</span>
+        <span title={t("sync.sourceHelp")}>{t("sync.source")}</span>
         <span title={t("sync.blockManualHelp")}>{t("sync.blockManual")}</span>
         <span title={t("sync.blockSourceHelp")}>{t("sync.blockSource")}</span>
         <span title={t("sync.blockTimestampHelp")}>{t("sync.blockTimestamp")}</span>
@@ -407,11 +580,15 @@ function SyncTable() {
         <span />
       </div>
       {FEATURES.map((feature) => {
-        const historyUtc = feature === "history" && (settings.historySyncMode ?? "utc") === "utc";
-        const historyManual = feature === "history" && settings.historySyncMode === "overwrite";
-        const source = sources[feature] ?? "";
+        const stored = sources[feature] ?? "";
+        const remote = stored && stored !== boot.deviceId ? stored : "";
+        const online = boot.links.filter((link) => link.state === "online" && link.deviceId !== boot.deviceId);
+        const options = [{ value: "", label: t("sync.thisDevice") }, ...online.map((link) => ({ value: link.deviceId, label: link.name }))];
+        if (remote && !options.some((item) => item.value === remote)) {
+          const current = boot.links.find((link) => link.deviceId === remote);
+          if (current) options.push({ value: current.deviceId, label: current.name });
+        }
         const pending = boot.pending.find((item) => item.feature === feature);
-        const blocked = flag(feature, "manual") || flag(feature, "all");
         return (
           <div className="sync-row" key={feature}>
             <span className="sync-name">
@@ -419,24 +596,13 @@ function SyncTable() {
               {settings.dirty?.[feature] && <span className="dirty-dot" title={t("sync.dirty")} />}
               {pending && <span className="state-pill pending small">{t("sync.waiting")}</span>}
             </span>
-            <span>
-              {historyUtc ? (
-                <span className="muted small">{t("sync.utcMerge")}</span>
-              ) : historyManual ? (
-                <span className="muted small">{t("sync.manualOnly")}</span>
-              ) : (
-                <Select
-                  label={t("sync.source")}
-                  value={source}
-                  onChange={(value) => setSource(feature, value)}
-                  options={[
-                    { value: "", label: t("sync.noSource") },
-                    { value: boot.deviceId, label: t("sync.thisDevice") },
-                    ...boot.links.map((link) => ({ value: link.deviceId, label: link.name })),
-                    ...(source && source !== boot.deviceId && !boot.links.some((link) => link.deviceId === source) ? [{ value: source, label: source.slice(0, 7) }] : []),
-                  ]}
-                />
-              )}
+            <span className="sync-follow">
+              <Select
+                label={t("sync.source")}
+                value={remote}
+                onChange={(value) => setSource(feature, value)}
+                options={options}
+              />
             </span>
             {BLOCKS.map((block) => (
               <span key={block} className="sync-check">
@@ -444,11 +610,7 @@ function SyncTable() {
               </span>
             ))}
             <span>
-              {!historyUtc && (
-                <button type="button" className="btn soft small" disabled={disabled || blocked || online.length === 0} title={online.length === 0 ? t("sync.noneOnline") : undefined} onClick={() => send(feature)}>
-                  {source && source !== boot.deviceId ? t("sync.refresh") : t("sync.send")}
-                </button>
-              )}
+              <SyncButton feature={feature} playlists={feature === "playlists"} compact />
             </span>
           </div>
         );

@@ -40,9 +40,6 @@ export function NowPlayingPage() {
       <div className="now-art">
         <div className="now-cover-wrap">
           <Cover src={track.coverUrl} className={`now-cover${playing ? " spinning-glow" : ""}`} />
-          <div className="now-mascot">
-            <Mascot mood={mood} size={104} />
-          </div>
         </div>
         <div className="now-meta">
           <div className="now-title-row">
@@ -70,10 +67,15 @@ export function NowPlayingPage() {
               </>
             )}
           </div>
-          <div className="now-badges">
-            <span className={`badge ${track.badge}`}>{t(`badge.${track.badge}`)}</span>
-            {app.engine.remoteDevice && <span className="badge remote">{t("now.from", { name: app.boot?.links.find((link) => link.deviceId === app.engine.remoteDevice)?.name ?? "" })}</span>}
-            {failed && app.failure && <span className="badge error">{t(app.failure.reason, { defaultValue: t("notice.playbackFailed") })}</span>}
+          <div className="now-foot">
+            <div className="now-badges">
+              <span className={`badge ${track.badge}`}>{t(`badge.${track.badge}`)}</span>
+              {app.engine.remoteDevice && <span className="badge remote">{t("now.from", { name: app.boot?.links.find((link) => link.deviceId === app.engine.remoteDevice)?.name ?? "" })}</span>}
+              {failed && app.failure && <span className="badge error">{t(app.failure.reason, { defaultValue: t("notice.playbackFailed") })}</span>}
+            </div>
+            <div className="now-mascot">
+              <Mascot mood={mood} size={88} />
+            </div>
           </div>
         </div>
       </div>

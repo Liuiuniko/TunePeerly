@@ -35,6 +35,10 @@ export class PlaybackEngine {
   private bufferEnough = false;
   private reportedPlayable = false;
   private wantPlay = false;
+  private playPending = false;
+  private playTicket = 0;
+  private endedSent = false;
+  private replayGuard = false;
 
   constructor(private readonly events: EngineEvents) {
     this.audio = new Audio();
@@ -75,7 +79,9 @@ export class PlaybackEngine {
 
   /** A new track, or the same track starting over. */
   start(track: Track, position = 0, autoplay = true): Promise<void> {
+    const replay = Boolean(this.source && !this.source.remote && this.track && sameMedia(this.track, track) && position <= 0.05);
     this.generation += 1;
+    const generation = this.generation;
     this.track = track;
     this.failedDevices = [];
     this.skipLocal = false;
@@ -83,7 +89,25 @@ export class PlaybackEngine {
     this.heardSeconds = 0;
     this.heardSent = false;
     this.reportedPlayable = false;
-    return this.attach(this.generation, position, autoplay);
+    this.endedSent = false;
+    if (replay && this.source) {
+      this.replayGuard = true;
+      try {
+        this.audio.currentTime = 0;
+      } catch {
+        // The element can refuse a seek until the next load; attach() covers that.
+        this.replayGuard = false;
+        return this.attach(generation, position, autoplay);
+      }
+      this.pendingSeek = 0;
+      this.lastTime = 0;
+      clock.set({ position: 0, duration: this.durationOf(track) });
+      this.bind(generation, 0, autoplay, track, this.source);
+      if (autoplay) this.resume();
+      return Promise.resolve();
+    }
+    this.replayGuard = false;
+    return this.attach(generation, position, autoplay);
   }
 
   toggle(): void {
@@ -103,13 +127,22 @@ export class PlaybackEngine {
       return;
     }
     this.wantPlay = true;
+    if (this.playPending) return;
+    this.playPending = true;
     const generation = this.generation;
-    this.audio.play().catch((error: unknown) => {
-      if (generation !== this.generation) return;
-      const name = error instanceof DOMException ? error.name : "";
-      if (name === "AbortError") return;
-      transport.set({ playing: false });
-    });
+    const ticket = ++this.playTicket;
+    this.audio.play().then(
+      () => {
+        if (ticket === this.playTicket) this.playPending = false;
+      },
+      (error: unknown) => {
+        if (ticket === this.playTicket) this.playPending = false;
+        if (generation !== this.generation) return;
+        const name = error instanceof DOMException ? error.name : "";
+        if (name === "AbortError") return;
+        transport.set({ playing: false });
+      },
+    );
   }
 
   pause(): void {
@@ -162,6 +195,8 @@ export class PlaybackEngine {
     }
     this.source = null;
     this.bufferEnough = false;
+    this.playTicket += 1;
+    this.playPending = false;
   }
 
   private async resolve(track: Track): Promise<Source> {
@@ -189,12 +224,21 @@ export class PlaybackEngine {
     } catch (error) {
       if (generation !== this.generation) return;
       const reason = errorText(error);
-      const kind: FailureKind = reason === "playback.allSourcesFailed" ? "transport" : reason.startsWith("playback.") ? "unsupported" : "offline";
-      this.events.failed(track, { reason, kind });
+      this.events.failed(track, { reason, kind: failureKind(reason) });
       return;
     }
     if (generation !== this.generation) return;
     this.source = source;
+    this.bind(generation, position, autoplay, track, source);
+    this.audio.src = source.url;
+    this.audio.load();
+  }
+
+  /** Listens to the element that is already showing `source`. Replaces any previous listeners. */
+  private bind(generation: number, position: number, autoplay: boolean, track: Track, source: Source): void {
+    this.listeners?.abort();
+    this.playTicket += 1;
+    this.playPending = false;
     this.wantPlay = autoplay;
     const controller = new AbortController();
     this.listeners = controller;
@@ -207,9 +251,14 @@ export class PlaybackEngine {
       if (this.wantPlay) this.resume();
     });
     on("durationchange", () => clock.set({ position: this.audio.currentTime, duration: this.durationOf(track) }));
-    on("timeupdate", () => this.tick(track));
+    on("timeupdate", () => {
+      this.releaseReplayGuard();
+      this.tick(track);
+      this.maybeFinish(generation, track);
+    });
     on("progress", () => this.checkBuffer(track));
     on("playing", () => {
+      this.releaseReplayGuard();
       transport.set({ playing: true });
       this.events.activity(true, track, this.bufferEnough);
     });
@@ -217,23 +266,40 @@ export class PlaybackEngine {
       transport.set({ playing: false });
       this.events.activity(false, track, this.bufferEnough);
       if (!this.audio.ended) this.events.paused(track, this.audio.currentTime);
+      this.maybeFinish(generation, track);
     });
     on("canplay", () => {
       this.reloads = 0;
+      if (this.wantPlay && this.audio.paused) this.resume();
       if (!this.reportedPlayable && !source.remote) {
         this.reportedPlayable = true;
         this.events.playable(track);
       }
     });
-    on("ended", () => {
-      transport.set({ playing: false });
-      this.countHeard(track, true);
-      this.events.ended();
-    });
+    on("ended", () => this.markEnded(generation, track));
     on("error", () => void this.handleError(generation, track, source));
+  }
 
-    this.audio.src = source.url;
-    this.audio.load();
+  private releaseReplayGuard(): void {
+    if (!this.replayGuard) return;
+    const duration = this.audio.duration;
+    const moved = this.audio.currentTime > 0.3 || (Number.isFinite(duration) && duration > 0.0 && this.audio.currentTime > duration * 0.5);
+    if (moved) this.replayGuard = false;
+  }
+
+  private markEnded(generation: number, track: Track): void {
+    if (this.endedSent || this.replayGuard || generation !== this.generation) return;
+    this.endedSent = true;
+    transport.set({ playing: false });
+    this.countHeard(track, true);
+    this.events.ended();
+  }
+
+  private maybeFinish(generation: number, track: Track): void {
+    if (!this.wantPlay || this.replayGuard) return;
+    const duration = this.audio.duration;
+    if (!Number.isFinite(duration) || duration < 0.3) return;
+    if (this.audio.ended || this.audio.currentTime >= duration - 0.12) this.markEnded(generation, track);
   }
 
   private durationOf(track: Track): number {
@@ -287,6 +353,7 @@ export class PlaybackEngine {
   private async handleError(generation: number, track: Track, source: Source): Promise<void> {
     if (generation !== this.generation) return;
     const code = this.audio.error?.code ?? 0;
+    if (code === 1) return;
     const position = this.audio.currentTime || this.pendingSeek;
     const wasPlaying = this.wantPlay;
     const status = await probe(source.url);
@@ -332,6 +399,19 @@ export class PlaybackEngine {
     transport.set({ playing: false });
     this.events.failed(track, failure);
   }
+}
+
+function sameMedia(left: Track, right: Track): boolean {
+  if (left.contentId && right.contentId) return left.contentId === right.contentId;
+  return Boolean(left.localFileId) && left.localFileId === right.localFileId;
+}
+
+function failureKind(reason: string): FailureKind {
+  if (reason === "playback.decodeFailed") return "decode";
+  if (reason === "playback.unsupported" || reason === "playback.video") return "unsupported";
+  if (reason === "playback.allSourcesFailed") return "transport";
+  if (reason.startsWith("playback.")) return "unsupported";
+  return "offline";
 }
 
 async function probe(url: string): Promise<number> {

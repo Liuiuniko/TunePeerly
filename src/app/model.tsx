@@ -1,26 +1,41 @@
 import { listen } from "@tauri-apps/api/event";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { api, errorText, pickFiles, pickFolder, type Bootstrap, type ContentMove, type MemberRef, type Settings, type Track } from "../api";
+import { api, errorText, pickFiles, pickFolder, type Bootstrap, type ContentMove, type MemberRef, type OverwriteAsk, type Settings, type Track } from "../api";
 import i18n from "../i18n";
-import { filterText, refOf, shufflable, trackKey, TrackIndex } from "../lib/library";
+import { filterText, refOf, reorderVisible, shufflable, trackKey, TrackIndex } from "../lib/library";
 import {
   addToQueue,
+  continueLibrary,
+  followListOrder,
   cycleRepeat,
   jumpTo,
   moveInQueue,
-  next as nextState,
+  nextOrWrap,
   onEnded,
   playFromList,
   playNext,
   previous as previousState,
   removeAt,
   startLibraryRandom,
+  startShuffled,
   toggleShuffle,
   type QueueState,
   type TrackRef,
 } from "../player/advance";
 import { PlaybackEngine, type EngineEvents } from "../player/engine";
+
+export type PlaybackMirror = {
+  deviceId: string;
+  contentId: string;
+  seconds: number;
+  playing: boolean;
+  duration: number;
+  title: string;
+  artist: string;
+  album: string;
+  at: number;
+};
 
 export type RouteName =
   | "home"
@@ -94,16 +109,48 @@ function useModel() {
   const [queue, setQueueState] = useState<QueueState>(emptyQueue);
   const [route, setRoute] = useState<Route>({ name: "home" });
   const [navigation, setNavigation] = useState({ canBack: false, canForward: false });
-  const [queueOpen, setQueueOpen] = useState(false);
+  // The queue starts open so it is easy to discover; closing it is remembered. Narrow windows start closed
+  // because the panel overlays the page there.
+  const [queueOpen, setQueueState_] = useState(() => {
+    try {
+      if (window.localStorage.getItem("queueOpen") === "0") return false;
+    } catch {
+      /* storage unavailable: use the default */
+    }
+    return window.innerWidth > 1040;
+  });
+  const [noticesOpen, setNoticesOpenState] = useState(false);
+  const setQueueOpen = useCallback((open: boolean) => {
+    setQueueState_(open);
+    if (open) setNoticesOpenState(false);
+    try {
+      window.localStorage.setItem("queueOpen", open ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  const setNoticesOpen = useCallback((open: boolean) => {
+    setNoticesOpenState(open);
+    if (open) {
+      setQueueState_(false);
+      try {
+        window.localStorage.setItem("queueOpen", "0");
+      } catch {
+        /* ignore */
+      }
+    }
+  }, []);
   const [menu, setMenu] = useState<MenuState>(null);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [notice, setNoticeState] = useState<string | null>(null);
+  const [alerts, setAlerts] = useState<{ id: number; text: string }[]>([]);
   const [moves, setMoves] = useState<ContentMove[]>([]);
+  const [overwriteAsks, setOverwriteAsks] = useState<OverwriteAsk[]>([]);
   const [volume, setVolumeState] = useState(1);
   const [muted, setMuted] = useState(false);
   const [lyrics, setLyrics] = useState<{ key: string; text: string } | null>(null);
   const [failure, setFailure] = useState<{ key: string; reason: string } | null>(null);
+  const [mirror, setMirror] = useState<PlaybackMirror | null>(null);
   const [search, setSearch] = useState("");
 
   const queueRef = useRef(queue);
@@ -115,9 +162,12 @@ function useModel() {
   const context = useRef<{ id: string; tracks: Track[] | null }>({ id: "library", tracks: null });
   const nav = useRef<{ stack: Route[]; index: number }>({ stack: [{ name: "home" }], index: 0 });
   const toastId = useRef(0);
-  const noticeTimer = useRef<number | undefined>(undefined);
+  const alertId = useRef(0);
   const volumeTimer = useRef<number | undefined>(undefined);
   const refreshTimer = useRef<number | undefined>(undefined);
+  const refreshRequest = useRef(0);
+  const membersRequest = useRef(0);
+  const lyricsRequest = useRef({ id: 0, key: null as string | null });
 
   const tracks = useMemo(() => boot?.tracks ?? [], [boot]);
   const index = useMemo(() => new TrackIndex(tracks), [tracks]);
@@ -165,9 +215,15 @@ function useModel() {
   }, []);
 
   const setNotice = useCallback((text: string | null) => {
-    window.clearTimeout(noticeTimer.current);
-    setNoticeState(text);
-    if (text) noticeTimer.current = window.setTimeout(() => setNoticeState(null), 8000);
+    if (!text) {
+      setAlerts([]);
+      return;
+    }
+    const id = ++alertId.current;
+    setAlerts((items) => [...items, { id, text }]);
+  }, []);
+  const dismissAlert = useCallback((id: number) => {
+    setAlerts((items) => items.filter((item) => item.id !== id));
   }, []);
 
   const say = useCallback((error: unknown) => {
@@ -176,22 +232,32 @@ function useModel() {
   }, [setNotice, t]);
 
   const applyLook = useCallback((theme: string, language: string) => {
-    document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
+    document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
     const lang = language === "zh" ? "zh" : "en";
     document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+    document.title = lang === "zh" ? "声渡" : "TunePeerly";
     if (i18n.language !== lang) void i18n.changeLanguage(lang);
+    if ("__TAURI_INTERNALS__" in window) {
+      const title = document.title;
+      void import("@tauri-apps/api/window")
+        .then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title))
+        .catch(() => {});
+    }
   }, []);
 
   const loadMembers = useCallback(async (playlists: Bootstrap["playlists"]) => {
+    const request = ++membersRequest.current;
     const rows = await Promise.all(
       playlists.map((playlist) => api.playlistMembers(playlist.id).then((items) => [playlist.id, items] as const).catch(() => [playlist.id, []] as const)),
     );
-    setMembers(Object.fromEntries(rows));
+    if (request === membersRequest.current) setMembers(Object.fromEntries(rows));
   }, []);
 
   const refresh = useCallback(async () => {
+    const request = ++refreshRequest.current;
     try {
       const next = await api.bootstrap();
+      if (request !== refreshRequest.current) return;
       setBoot(next);
       setLoadError(null);
       applyLook(next.theme, next.language);
@@ -209,7 +275,7 @@ function useModel() {
         engine.cue(new TrackIndex(next.tracks).get(state.current) ?? null, state.positionSec);
       }
     } catch (error) {
-      setLoadError(errorText(error));
+      if (request === refreshRequest.current) setLoadError(errorText(error));
     }
   }, [applyLook, engine, loadMembers]);
 
@@ -220,21 +286,52 @@ function useModel() {
 
   useEffect(() => {
     void refresh();
+    let disposed = false;
     const stops = Promise.all([
-      listen("library-updated", scheduleRefresh),
-      listen("network-updated", scheduleRefresh),
-      listen<unknown>("queue-updated", (event) => {
-        const future = refs(event.payload);
-        const state = { ...queueRef.current, future };
-        queueRef.current = state;
-        setQueueState(state);
+      listen("library-updated", () => {
+        if (!disposed) scheduleRefresh();
       }),
-      listen<ContentMove>("content-moved", (event) => setMoves((items) => [...items, event.payload])),
+      listen("network-updated", () => {
+        if (!disposed) scheduleRefresh();
+      }),
+      listen<ContentMove>("content-moved", (event) => {
+        if (!disposed) setMoves((items) => [...items, event.payload]);
+      }),
+      listen<OverwriteAsk[]>("overwrite-asks", (event) => {
+        if (!disposed) setOverwriteAsks(Array.isArray(event.payload) ? event.payload.slice(0, 3) : []);
+      }),
+      listen<{ feature?: string; name?: string }>("sync-denied", (event) => {
+        if (disposed) return;
+        const feature = event.payload.feature ? t(`feature.${event.payload.feature}`, { defaultValue: event.payload.feature }) : "";
+        toast(t("toast.syncDenied", { name: event.payload.name || t("sync.thatDevice"), feature }));
+      }),
+      listen<Omit<PlaybackMirror, "at">>("playback-mirror", (event) => {
+        if (disposed) return;
+        const selected = String(bootRef.current?.settings.positionSyncDevice ?? "");
+        const row = event.payload;
+        if (!selected || row.deviceId !== selected || bootRef.current?.settings.incognito) return;
+        setMirror({ ...row, at: performance.now() });
+        if (engine.playing) engine.pause();
+      }),
     ]).catch(() => [] as (() => void)[]);
     return () => {
+      disposed = true;
+      window.clearTimeout(refreshTimer.current);
+      refreshRequest.current += 1;
+      membersRequest.current += 1;
+      lyricsRequest.current = { id: lyricsRequest.current.id + 1, key: null };
       void stops.then((items) => items.forEach((stop) => stop()));
     };
-  }, [refresh, scheduleRefresh]);
+  }, [refresh, scheduleRefresh, t, toast, engine]);
+
+  useEffect(() => {
+    const selected = String(settings.positionSyncDevice ?? "");
+    if (!selected || settings.incognito) {
+      setMirror(null);
+      return;
+    }
+    if (engine.playing) engine.pause();
+  }, [settings.positionSyncDevice, settings.incognito, engine]);
 
   const commit = useCallback((state: QueueState, position: number = engine.position) => {
     const trimmed = state.past.length > PAST_LIMIT ? { ...state, past: state.past.slice(-PAST_LIMIT) } : state;
@@ -275,19 +372,43 @@ function useModel() {
   }, [contextTracks]);
 
   const loadLyrics = useCallback((track: Track | undefined) => {
+    const key = track?.localFileId ? trackKey(track) : null;
+    if (lyricsRequest.current.key === key) return;
+    const request = lyricsRequest.current.id + 1;
+    lyricsRequest.current = { id: request, key };
     if (!track?.localFileId) {
       setLyrics(null);
       return;
     }
-    const key = trackKey(track);
-    void api.lyrics(track.localFileId).then((text) => setLyrics({ key, text })).catch(() => setLyrics({ key, text: "" }));
+    const lyricKey = trackKey(track);
+    setLyrics((value) => (value?.key === lyricKey ? value : null));
+    void api.lyrics(track.localFileId).then(
+      (text) => {
+        if (lyricsRequest.current.id === request) setLyrics({ key: lyricKey, text });
+      },
+      () => {
+        if (lyricsRequest.current.id === request) setLyrics({ key: lyricKey, text: "" });
+      },
+    );
   }, []);
 
-  const leave = useCallback(() => {
-    const playing = engine.current;
-    if (!playing?.contentId || !bootRef.current?.settings.positionSync) return;
-    void api.network("position", { contentId: playing.contentId, seconds: engine.position }).catch(() => {});
+  const publishPlayback = useCallback((playing?: boolean, track = engine.current, seconds = engine.position) => {
+    if (!track?.contentId || bootRef.current?.settings.incognito) return;
+    void api.network("position", {
+      contentId: track.contentId,
+      seconds,
+      playing: playing ?? engine.playing,
+      duration: (track.durationMs ?? 0) / 1000,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+    }).catch(() => {});
   }, [engine]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => publishPlayback(), 1000);
+    return () => window.clearInterval(timer);
+  }, [publishPlayback]);
 
   const startCurrent = useCallback((state: QueueState) => {
     const track = indexRef.current.get(state.current);
@@ -295,6 +416,11 @@ function useModel() {
     if (!track) {
       engine.cue(null, 0);
       setLyrics(null);
+      return;
+    }
+    if (String(bootRef.current?.settings.positionSyncDevice ?? "") && !bootRef.current?.settings.incognito) {
+      engine.cue(track, state.positionSec);
+      loadLyrics(track);
       return;
     }
     void engine.start(track, state.positionSec, true);
@@ -310,11 +436,10 @@ function useModel() {
     }
     const pool = list.filter((track, position) => position === at || track.playable);
     context.current = { id: contextId, tracks: pool };
-    leave();
     const state = playFromList({ ...queueRef.current, contextId }, pool.map(refOf), pool.indexOf(chosen), shuffle, Math.random);
     commit(state, 0);
     startCurrent(state);
-  }, [commit, leave, setNotice, startCurrent, t]);
+  }, [commit, setNotice, startCurrent, t]);
 
   const playAll = useCallback((list: Track[], contextId: string, shuffle = false) => {
     const playable = list.filter((track) => track.playable);
@@ -322,9 +447,15 @@ function useModel() {
       setNotice(t("notice.nothingPlayable"));
       return;
     }
-    const start = shuffle ? list.indexOf(playable[Math.floor(Math.random() * playable.length)]) : list.indexOf(playable[0]);
-    playList(list, start, contextId, shuffle);
-  }, [playList, setNotice, t]);
+    if (shuffle) {
+      context.current = { id: contextId, tracks: playable };
+        const state = { ...startShuffled(playable.map(refOf), Math.random, contextId, "listShuffle"), repeat: queueRef.current.repeat };
+      commit(state, 0);
+      startCurrent(state);
+      return;
+    }
+    playList(list, list.indexOf(playable[0]), contextId, false);
+  }, [commit, playList, setNotice, startCurrent, t]);
 
   const shuffleLibrary = useCallback(() => {
     const pool = (bootRef.current?.tracks ?? []).filter(shufflable);
@@ -333,40 +464,40 @@ function useModel() {
       return;
     }
     context.current = { id: "random", tracks: pool };
-    leave();
     const state = { ...startLibraryRandom(pool.map(refOf), Math.random, "random"), repeat: queueRef.current.repeat };
     commit(state, 0);
     startCurrent(state);
-  }, [commit, leave, setNotice, startCurrent, t]);
+  }, [commit, setNotice, startCurrent, t]);
 
   const next = useCallback(() => {
     const state = queueRef.current;
-    let target: QueueState | null = null;
-    if (state.future.length > 0) target = nextState(state);
-    else if (state.repeat !== "off" && state.current) {
-      const result = onEnded({ ...state, repeat: "list" }, rebuildPool(state).map(refOf), Math.random);
-      target = result.increment ? { ...result.state, repeat: state.repeat } : null;
+    const target = nextOrWrap(state, rebuildPool(state).map(refOf), Math.random);
+    if (!target.current) return;
+    const sameSong = target.current.key === state.current?.key && target.past.length === state.past.length && target.future.length === state.future.length;
+    if (sameSong) {
+      const restarted = { ...state, positionSec: 0 };
+      commit(restarted, 0);
+      startCurrent(restarted);
+      return;
     }
-    if (!target) return;
-    leave();
     commit(target, 0);
     startCurrent(target);
-  }, [commit, leave, rebuildPool, startCurrent]);
+  }, [commit, rebuildPool, startCurrent]);
 
   const previous = useCallback(() => {
     const state = queueRef.current;
     if (!state.current) return;
-    const target = previousState(state, engine.position);
-    if (target.current?.key === state.current.key && target.past.length === state.past.length) {
+    const target = previousState(state, engine.position, rebuildPool(state).map(refOf));
+    if (target.current?.key === state.current.key && target.past.length === state.past.length && target.future.length === state.future.length) {
       engine.seek(0);
       return;
     }
-    leave();
     commit(target, 0);
     startCurrent(target);
-  }, [commit, engine, leave, startCurrent]);
+  }, [commit, engine, rebuildPool, startCurrent]);
 
   const toggle = useCallback(() => {
+    if (String(bootRef.current?.settings.positionSyncDevice ?? "") && !bootRef.current?.settings.incognito) return;
     const state = queueRef.current;
     if (!state.current) {
       if (state.future.length > 0) next();
@@ -381,14 +512,13 @@ function useModel() {
       engine.cue(track, resume);
     }
     engine.toggle();
-  }, [engine, library, loadLyrics, next, playAll]);
+  }, [engine, library, next, playAll]);
 
   const jump = useCallback((at: number) => {
     const target = jumpTo(queueRef.current, at);
-    leave();
     commit(target, 0);
     startCurrent(target);
-  }, [commit, leave, startCurrent]);
+  }, [commit, startCurrent]);
 
   const queueActions = useMemo(() => ({
     playNext: (items: Track[]) => {
@@ -414,8 +544,12 @@ function useModel() {
   const toggleShuffleMode = useCallback(() => {
     const state = queueRef.current;
     const pool = context.current.id === state.contextId && context.current.tracks ? context.current.tracks : contextTracks(state.contextId);
-    commit(toggleShuffle(state, pool.filter((track) => track.playable).map(refOf), Math.random));
-  }, [commit, contextTracks]);
+    const next = toggleShuffle(state, pool.filter((track) => track.playable).map(refOf), Math.random);
+    commit(next, state.current ? engine.position : 0);
+    if (!state.current && next.current) {
+        startCurrent(next);
+    }
+  }, [commit, contextTracks, engine, startCurrent]);
 
   const cycleRepeatMode = useCallback(() => {
     commit({ ...queueRef.current, repeat: cycleRepeat(queueRef.current.repeat) });
@@ -616,37 +750,86 @@ function useModel() {
     }
   }, [refresh, say, t, toast]);
 
-  const movePlaylistMember = useCallback(async (playlistId: string, from: number, to: number) => {
-    setMembers((value) => {
-      const list = (value[playlistId] ?? []).slice();
-      const [item] = list.splice(from, 1);
-      if (item) list.splice(to, 0, item);
-      return { ...value, [playlistId]: list };
-    });
+  const applyPlayingOrder = useCallback((contextId: string, ordered: Track[]) => {
+    const playable = ordered.filter((track) => track.playable);
+    if (context.current.id === contextId) context.current = { id: contextId, tracks: playable };
+    const state = queueRef.current;
+    if (state.contextId !== contextId || state.order !== "manual") return;
+    const followed = followListOrder(state, playable.map(refOf));
+    const same = followed.future.length === state.future.length && followed.future.every((item, index) => item.key === state.future[index]?.key);
+    if (!same) commit(followed, engine.position);
+  }, [commit, engine]);
+
+  const moveLibrary = useCallback(async (from: number, to: number) => {
+    const boot = bootRef.current;
+    if (!boot || from === to) return;
+    const visible = (track: Track) => boot.settings.showUnavailable !== false || track.badge !== "unavailable";
+    const tracks = reorderVisible(boot.tracks, visible, from, to);
+    if (tracks === boot.tracks) return;
+    const next = { ...boot, tracks };
+    bootRef.current = next;
+    setBoot(next);
     try {
-      await api.movePlaylistMember(playlistId, from, to);
+      await api.setLibraryOrder(tracks.map((track) => trackKey(track)).filter(Boolean));
+      applyPlayingOrder("library", tracks.filter(visible));
     } catch (error) {
       say(error);
     }
     scheduleRefresh();
-  }, [say, scheduleRefresh]);
+  }, [applyPlayingOrder, say, scheduleRefresh]);
+
+  const movePlaylistMember = useCallback(async (playlistId: string, from: number, to: number) => {
+    const list = (membersRef.current[playlistId] ?? []).slice();
+    const [item] = list.splice(from, 1);
+    if (!item) return;
+    list.splice(to, 0, item);
+    const nextMembers = { ...membersRef.current, [playlistId]: list };
+    membersRef.current = nextMembers;
+    setMembers(nextMembers);
+    try {
+      await api.movePlaylistMember(playlistId, from, to);
+      applyPlayingOrder(`playlist:${playlistId}`, indexRef.current.members(list));
+    } catch (error) {
+      say(error);
+    }
+    scheduleRefresh();
+  }, [applyPlayingOrder, say, scheduleRefresh]);
 
   handlers.current = {
     ended: () => {
       const state = queueRef.current;
       const track = indexRef.current.get(state.current);
+      const pausedHistory = Boolean(bootRef.current?.settings.historyPaused);
+      if (track && !bootRef.current?.settings.incognito && !pausedHistory) {
+        const key = trackKey(track);
+        patchBoot((item) => ({ ...item, history: [key, ...item.history.filter((value) => value !== key)] }));
+        void api.recordHistory(track.contentId, track.localFileId).catch(() => {});
+      }
       if (state.repeat === "one" && track) {
-        void engine.start(track, 0, true);
+        // Persist the restart immediately.  Calling the engine alone leaves
+        // the saved queue at the old end position when the app is closed
+        // during the next loop.
+        const restarted = { ...state, positionSec: 0 };
+        commit(restarted, 0);
+        startCurrent(restarted);
         return;
       }
       const result = onEnded(state, rebuildPool(state).map(refOf), Math.random);
       if (result.increment && result.state.current) {
         commit(result.state, 0);
         startCurrent(result.state);
-      } else {
+        return;
+      }
+      const tracks = contextTracks("library").filter((item) => item.playable);
+      const continued = continueLibrary(state, tracks.map(refOf), Math.random);
+      if (!continued.current) {
         commit({ ...state, positionSec: 0 }, 0);
         engine.cue(track ?? null, 0);
+        return;
       }
+      context.current = { id: continued.contextId, tracks };
+      commit(continued, 0);
+      startCurrent(continued);
     },
     failed: (track, info) => {
       setFailure({ key: trackKey(track), reason: info.reason });
@@ -655,27 +838,24 @@ function useModel() {
         void api.playbackResult(track.localFileId, track.contentId, "failed", info.reason).then(scheduleRefresh).catch(() => {});
       }
     },
-    heard: (track) => {
-      if (bootRef.current?.settings.incognito) return;
-      const key = trackKey(track);
-      patchBoot((item) => ({ ...item, history: [key, ...item.history.filter((value) => value !== key)] }));
-      void api.recordHistory(track.contentId, track.localFileId).catch(() => {});
-    },
+    heard: () => {},
     paused: (track, position) => {
       void api.saveProgress(position).catch(() => {});
-      if (track.contentId && bootRef.current?.settings.positionSync) {
-        void api.network("position", { contentId: track.contentId, seconds: position }).catch(() => {});
-      }
+      publishPlayback(false, track, position);
     },
     seeked: (track, position, paused) => {
       void api.saveProgress(position).catch(() => {});
-      if (paused && track.contentId && bootRef.current?.settings.positionSync) {
-        void api.network("position", { contentId: track.contentId, seconds: position }).catch(() => {});
-      }
+      publishPlayback(!paused, track, position);
     },
     progress: (position) => void api.saveProgress(position).catch(() => {}),
-    activity: (playing, track, bufferEnough) =>
-      void api.network("activity", { playing, localFileId: track?.localFileId ?? null, bufferEnough }).catch(() => {}),
+    activity: (playing, track, bufferEnough) => {
+      if (playing && String(bootRef.current?.settings.positionSyncDevice ?? "") && !bootRef.current?.settings.incognito) {
+        engine.pause();
+        return;
+      }
+      void api.network("activity", { playing, localFileId: track?.localFileId ?? null, bufferEnough }).catch(() => {});
+      if (track?.contentId) publishPlayback(playing, track, engine.position);
+    },
     playable: (track) => {
       if (track.playbackStatus !== "playable") void api.playbackResult(track.localFileId, track.contentId, "playable", null).catch(() => {});
     },
@@ -684,19 +864,15 @@ function useModel() {
   useEffect(() => {
     const flush = () => {
       void api.saveProgress(engine.position).catch(() => {});
-      leave();
+      publishPlayback(false);
     };
     window.addEventListener("beforeunload", flush);
     return () => window.removeEventListener("beforeunload", flush);
-  }, [engine, leave]);
+  }, [engine, publishPlayback]);
 
   useEffect(() => {
-    if (!current) {
-      setLyrics(null);
-      return;
-    }
-    if (lyrics?.key !== trackKey(current)) loadLyrics(current);
-  }, [current?.contentId, current?.localFileId]);
+    loadLyrics(current);
+  }, [current?.contentId, current?.localFileId, loadLyrics]);
 
   const findTracks = useCallback((text: string, scope: "all" | "queue" | string) => {
     if (scope === "queue") {
@@ -724,17 +900,23 @@ function useModel() {
     muted,
     lyrics,
     failure,
+    mirror,
     route,
     navigation,
     queueOpen,
+    noticesOpen,
+    unreadNotices: (boot?.notices ?? []).filter((item) => !item.read).length,
     menu,
     dialog,
     toasts,
-    notice,
+    alerts,
+    dismissAlert,
     moves,
+    overwriteAsks,
     search,
     setSearch,
     setQueueOpen,
+    setNoticesOpen,
     setMenu,
     setDialog,
     setNotice,
@@ -767,6 +949,7 @@ function useModel() {
     deletePlaylist,
     removeFromPlaylist,
     movePlaylistMember,
+    moveLibrary,
     contextTracks,
     findTracks,
   };

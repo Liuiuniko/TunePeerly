@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useApp, type Route } from "../app/model";
 import { covers, folderName, groupTracks } from "../lib/library";
 import { Icons } from "../ui/icons";
-import { Collage, Cover, LikedCover } from "./Cover";
+import { Cover, LikedCover } from "./Cover";
 
 type Chip = "playlists" | "artists" | "albums" | "folders" | "devices";
 type Item = { key: string; title: string; sub: string; cover: ReactNode; open: () => void; active: boolean; drop?: string; menu?: string };
@@ -54,7 +54,10 @@ export function Sidebar({ width, collapsed, onResize, onCollapse }: { width: num
           sub: t(`link.${link.state}`),
           cover: (
             <span className="device-cover">
-              <Icons.devices />
+              {(() => {
+                const art = covers(app.tracks.filter((track) => track.holderIds.includes(link.deviceId)), 1, `device:${link.deviceId}`)[0];
+                return art ? <Cover src={art} /> : <Icons.devices />;
+              })()}
               <span className={`device-dot ${link.state}`} />
             </span>
           ),
@@ -66,16 +69,17 @@ export function Sidebar({ width, collapsed, onResize, onCollapse }: { width: num
           key: playlist.id,
           title: playlist.name,
           sub: t("sidebar.playlistSub", { count: playlist.count }),
-          cover: <Collage covers={covers(app.index.members(app.members[playlist.id] ?? []))} />,
+          cover: <Cover src={covers(app.index.members(app.members[playlist.id] ?? []), 1, `playlist:${playlist.id}`)[0]} />,
           open: go({ name: "playlist", id: playlist.id }),
           active: is("playlist", playlist.id),
           drop: `playlist:${playlist.id}`,
           menu: playlist.id,
         }));
     }
-  }, [chip, app.library, app.boot, app.members, app.index, app.navigate, route, t]);
+  }, [chip, app.library, app.tracks, app.boot, app.members, app.index, app.navigate, route, t]);
 
   const onHandleDown = (event: ReactPointerEvent) => {
+    if (event.button !== 0) return;
     event.preventDefault();
     drag.current = { start: event.clientX, width: collapsed ? COLLAPSED : width };
     const move = (moveEvent: PointerEvent) => {
@@ -87,15 +91,45 @@ export function Sidebar({ width, collapsed, onResize, onCollapse }: { width: num
         onResize(Math.min(MAX, Math.max(MIN, next)));
       }
     };
-    const up = () => {
+    const finish = () => {
       drag.current = null;
       document.body.classList.remove("resizing");
       window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("blur", finish);
     };
     document.body.classList.add("resizing");
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    window.addEventListener("blur", finish);
+  };
+
+  const onHandleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Home") {
+      event.preventDefault();
+      onCollapse(true);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      onCollapse(false);
+      onResize(MAX);
+      return;
+    }
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    if (collapsed) {
+      if (event.key === "ArrowRight") {
+        onCollapse(false);
+        onResize(MIN);
+      }
+      return;
+    }
+    const next = width + (event.key === "ArrowRight" ? 16 : -16);
+    if (next < MIN) onCollapse(true);
+    else onResize(Math.min(MAX, next));
   };
 
   return (
@@ -104,6 +138,14 @@ export function Sidebar({ width, collapsed, onResize, onCollapse }: { width: num
         <NavItem icon={is("home") ? <Icons.homeFill /> : <Icons.home />} label={t("nav.home")} active={is("home")} collapsed={collapsed} onClick={() => app.navigate({ name: "home" })} />
         <NavItem icon={<Icons.search />} label={t("nav.search")} active={is("search")} collapsed={collapsed} onClick={() => app.navigate({ name: "search" })} />
         <NavItem icon={<Icons.music />} label={t("nav.allMusic")} active={is("library")} collapsed={collapsed} onClick={() => app.navigate({ name: "library" })} />
+        <NavItem
+          icon={<Icons.queue />}
+          label={t("queue.title")}
+          active={app.queueOpen}
+          toggle
+          collapsed={collapsed}
+          onClick={() => app.setQueueOpen(!app.queueOpen)}
+        />
       </nav>
 
       <section className="side-card side-library">
@@ -130,8 +172,8 @@ export function Sidebar({ width, collapsed, onResize, onCollapse }: { width: num
         <div className="side-list">
           {chip === "playlists" && (
             <>
-              <SideItem cover={<LikedCover />} title={t("nav.liked")} sub={t("sidebar.playlistSub", { count: app.liked.length })} active={is("liked")} collapsed={collapsed} drop="liked" onClick={() => app.navigate({ name: "liked" })} pinned />
-              <SideItem cover={<Collage covers={covers(app.recent)} />} title={t("nav.recent")} sub={t("sidebar.playlistSub", { count: app.recent.length })} active={is("recent")} collapsed={collapsed} onClick={() => app.navigate({ name: "recent" })} />
+              <SideItem cover={covers(app.liked, 1, "liked")[0] ? <Cover src={covers(app.liked, 1, "liked")[0]} /> : <LikedCover />} title={t("nav.liked")} sub={t("sidebar.playlistSub", { count: app.liked.length })} active={is("liked")} collapsed={collapsed} drop="liked" onClick={() => app.navigate({ name: "liked" })} pinned />
+              <SideItem cover={covers(app.recent, 1, "recent")[0] ? <Cover src={covers(app.recent, 1, "recent")[0]} /> : <Cover icon="music" />} title={t("nav.recent")} sub={t("sidebar.playlistSub", { count: app.recent.length })} active={is("recent")} collapsed={collapsed} onClick={() => app.navigate({ name: "recent" })} />
             </>
           )}
           {items.map((item) => (
@@ -172,14 +214,34 @@ export function Sidebar({ width, collapsed, onResize, onCollapse }: { width: num
         <NavItem icon={<Icons.devices />} label={t("nav.devices")} active={is("devices") || is("device")} collapsed={collapsed} onClick={() => app.navigate({ name: "devices" })} badge={app.boot?.offer ? "!" : undefined} />
         <NavItem icon={<Icons.settings />} label={t("nav.settings")} active={is("settings") || is("problems")} collapsed={collapsed} onClick={() => app.navigate({ name: "settings" })} />
       </nav>
-      <div className="resize-handle" onPointerDown={onHandleDown} onDoubleClick={() => onCollapse(!collapsed)} role="separator" aria-orientation="vertical" aria-label={t("sidebar.resize")} />
+      <div
+        className="resize-handle"
+        onPointerDown={onHandleDown}
+        onDoubleClick={() => onCollapse(!collapsed)}
+        onKeyDown={onHandleKeyDown}
+        role="separator"
+        tabIndex={0}
+        aria-orientation="vertical"
+        aria-label={t("sidebar.resize")}
+        aria-valuemin={COLLAPSED}
+        aria-valuemax={MAX}
+        aria-valuenow={collapsed ? COLLAPSED : width}
+      />
     </aside>
   );
 }
 
-function NavItem({ icon, label, active, collapsed, onClick, badge }: { icon: ReactNode; label: string; active: boolean; collapsed: boolean; onClick: () => void; badge?: string }) {
+function NavItem({ icon, label, active, collapsed, onClick, badge, toggle }: { icon: ReactNode; label: string; active: boolean; collapsed: boolean; onClick: () => void; badge?: string; toggle?: boolean }) {
   return (
-    <button type="button" className={`nav-item${active ? " active" : ""}`} onClick={onClick} title={collapsed ? label : undefined} aria-label={label} aria-current={active ? "page" : undefined}>
+    <button
+      type="button"
+      className={`nav-item${active ? " active" : ""}`}
+      onClick={onClick}
+      title={collapsed ? label : undefined}
+      aria-label={label}
+      aria-current={active && !toggle ? "page" : undefined}
+      aria-pressed={toggle ? active : undefined}
+    >
       {icon}
       {!collapsed && <span>{label}</span>}
       {badge && <span className="nav-badge">{badge}</span>}

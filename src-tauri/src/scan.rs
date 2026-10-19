@@ -64,8 +64,10 @@ struct Prepared {
 pub fn import_path(db: &Arc<Mutex<Db>>, path: &Path, kind: &str) -> AppResult<ImportSummary> {
     let kind = match kind {
         "auto" if path.is_dir() => "directory",
-        "auto" => "file",
-        other => other,
+        "auto" if path.is_file() => "file",
+        "file" if path.is_file() => "file",
+        "directory" if path.is_dir() => "directory",
+        _ => return Err(AppError::Message("file.unreadable".into())),
     };
     if !path.exists() {
         return Err(AppError::Message("file.missing".into()));
@@ -301,15 +303,26 @@ fn write_prepared(
 }
 
 fn collect_audio(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_audio(&path, out);
-        } else if is_audio_candidate(&path) && !is_download_temp(&path) {
-            out.push(path);
+    // `Path::is_dir` follows links.  Recursing that way can walk a junction
+    // back to an ancestor forever (and could pull unrelated files into a
+    // granted folder), so walk only real directories iteratively.
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = fs::read_dir(next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                let path = entry.path();
+                if is_audio_candidate(&path) && !is_download_temp(&path) {
+                    out.push(path);
+                }
+            }
         }
     }
 }

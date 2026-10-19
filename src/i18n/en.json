@@ -1,5 +1,8 @@
 {
-  "boot": { "loading": "Opening your library…", "failed": "The library could not be opened." },
+  "boot": {
+    "loading": "Opening your library…",
+    "failed": "The library could not be opened."
+  },
   "common": {
     "cancel": "Cancel",
     "choose": "Choose…",
@@ -27,6 +30,7 @@
     "albums": "Albums",
     "folders": "Folders",
     "devices": "Devices",
+    "notices": "Activity",
     "settings": "Settings",
     "back": "Go back",
     "forward": "Go forward",
@@ -50,6 +54,13 @@
     "firstPlaylist": "Create your first playlist",
     "firstPlaylistBody": "Drag songs onto a playlist in this list to add them.",
     "dropHere": "Drop to add"
+  },
+  "top": {
+    "refresh": "Refresh",
+    "refreshHelp": "Reload the library and choose new covers",
+    "incognito": "Incognito",
+    "incognitoOn": "Incognito is on. Click to turn it off.",
+    "incognitoOff": "Turn on incognito. This computer goes offline and playback from other devices stops."
   },
   "status": {
     "incognito": "Incognito",
@@ -90,7 +101,12 @@
     "unknownAlbum": "Unknown album",
     "untitled": "Untitled"
   },
-  "badge": { "local": "Local", "remote": "Remote", "unavailable": "Unavailable", "error": "Can't play" },
+  "badge": {
+    "local": "Local",
+    "remote": "Remote",
+    "unavailable": "Unavailable",
+    "error": "Can't play"
+  },
   "list": {
     "play": "Play",
     "shuffle": "Shuffle",
@@ -106,6 +122,13 @@
     "filter": "Find in this list",
     "filterPlaceholder": "Find in list",
     "sortBy": "Sort by",
+    "sortColumn": "Sort by this column",
+    "sortAsc": "Ascending. Click for descending",
+    "sortDesc": "Descending. Click for ascending",
+    "exposed": "Exposed",
+    "hidden": "Not exposed",
+    "exposedHelp": "Paired devices can play this song",
+    "hiddenHelp": "Paired devices cannot play this song",
     "empty": "No songs here.",
     "noMatch": "No songs match “{{text}}”."
   },
@@ -118,7 +141,8 @@
     "album": "Album",
     "folder": "Folder",
     "added": "Recently added",
-    "liked": "Liked first"
+    "liked": "Liked first",
+    "duration": "Duration"
   },
   "empty": {
     "likedTitle": "Songs you like appear here",
@@ -153,7 +177,14 @@
     "exposeAll": "Expose all now",
     "hideAll": "Stop exposing all",
     "exposeDefault": "Expose to paired devices",
-    "hideDefault": "Keep on this computer"
+    "hideDefault": "Keep on this computer",
+    "followHint": "When a song is added, the global setting “New local songs” decides. Change that setting in Settings → Library, or with the eye on All music.",
+    "exposeHint": "Local songs added here are offered to your paired devices right away, whatever the global setting says.",
+    "hideHint": "Local songs added here stay on this computer only, whatever the global setting says.",
+    "exposeDefaultHint": "Local songs you add from now on are offered to paired devices right away.",
+    "hideDefaultHint": "Local songs you add from now on stay on this computer until you expose them.",
+    "exposeAllHint": "Offer every local song already here to your paired devices.",
+    "hideAllHint": "Stop offering every local song already here. They stay on this computer."
   },
   "menu": {
     "play": "Play",
@@ -172,6 +203,21 @@
     "stopExposing": "Stop exposing",
     "more": "More options"
   },
+  "tray": {
+    "show": "Show",
+    "quit": "Quit"
+  },
+  "window": {
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restore": "Restore",
+    "close": "Close",
+    "closeAskTitle": "Close the player?",
+    "closeAskBody": "You can leave it running in the system tray.",
+    "closeQuit": "Quit",
+    "closeTray": "Minimize to tray",
+    "closeRemember": "Don't ask again"
+  },
   "player": {
     "idle": "Pick a song to start listening",
     "play": "Play",
@@ -183,11 +229,16 @@
     "nextShortcut": "Next (Ctrl+Right)",
     "shuffle": "Shuffle",
     "libraryRandom": "Shuffling all music",
-    "repeat": { "off": "Repeat off", "list": "Repeat all", "one": "Repeat one" },
+    "repeat": {
+      "off": "Repeat off",
+      "list": "Repeat all",
+      "one": "Repeat one"
+    },
     "seek": "Seek",
     "toggleRemaining": "Switch between total and remaining time",
     "lyrics": "Now playing and lyrics",
     "queue": "Queue",
+    "notices": "Notifications",
     "mute": "Mute",
     "unmute": "Unmute",
     "volume": "Volume"
@@ -247,13 +298,44 @@
     "exposed": "Paired devices can now play these songs",
     "hidden": "These songs are no longer exposed",
     "synced": "Sent to online devices",
-    "restartNeeded": "Saved. Restart the app to use the new database."
+    "requested": "Asked {{name}} to replace this computer's copy",
+    "syncDenied": "{{name}} did not send {{feature}}"
   },
   "notice": {
-    "offlineTrack": "The device that has this song is offline, or the song is not on this computer.",
-    "nothingPlayable": "Nothing here can be played right now.",
-    "playbackFailed": "This song could not be played.",
-    "incognitoStopped": "Incognito is on, so playback from other devices stopped."
+    "empty": "No notifications yet.",
+    "clear": "Clear",
+    "readAll": "Mark all read",
+    "unread": "Unread",
+    "more": "More",
+    "dismiss": "Delete notification",
+    "openSettings": "Notification settings",
+    "markUnread": "Mark as unread",
+    "pin": "Pin",
+    "unpin": "Unpin",
+    "clearTitle": "Delete notifications?",
+    "clearBody": "Pinned notifications can be kept.",
+    "clearKeepPinned": "Delete all except pinned",
+    "clearAll": "Delete all",
+    "paired": "Paired",
+    "request": "Connection request",
+    "declined": "Declined a pairing request",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "blocked": "Blocked",
+    "unblocked": "Unblocked",
+    "sync": "Received changes",
+    "conflict": "Sync conflict",
+    "overwrite": "Overwrite request",
+    "detail": {
+      "full": "Full trust",
+      "verify": "Ask each time",
+      "incognito": "Incognito turned on",
+      "keep": "Kept this computer's copy",
+      "take": "Used their copy",
+      "ask": "Waiting for a choice",
+      "timeout": "No choice within a minute, so nothing was overwritten",
+      "cancel": "Kept this computer's copy"
+    }
   },
   "file": {
     "missing": "The file is gone from disk.",
@@ -265,7 +347,9 @@
     "video": "This is a video file.",
     "allSourcesFailed": "No device could play this song."
   },
-  "metadata": { "failed": "Tags could not be read; the file name is used instead." },
+  "metadata": {
+    "failed": "Tags could not be read; the file name is used instead."
+  },
   "problems": {
     "title": "Problems",
     "help": "Songs that could not be read or played. Fix the file or the folder permissions, then rescan.",
@@ -284,10 +368,10 @@
     "nameHelp": "Shown to nearby and paired devices.",
     "status": "Connection",
     "port": "LAN port {{port}}",
-    "pairingText": "Pairing text",
-    "pairingHelp": "Send this text to your other computer and paste it there under Pair with text. It contains no music or file names.",
+    "pairLan": "Pair on this network",
+    "pairLanHelp": "First pairing happens here, between computers on the same network. Both screens show a safety number. After you accept, the two devices remember each other and can reconnect through the relay without pairing again.",
     "paired": "Paired devices",
-    "noPaired": "No paired devices yet. Turn on discovery in Settings, or pair with text below.",
+    "noPaired": "No paired devices yet. Turn on discovery in Settings and pair with a computer on this network.",
     "viaLan": "Local network",
     "viaRelay": "Relay",
     "browse": "Browse",
@@ -298,6 +382,22 @@
     "discoveryOff": "Discovery is off. Turn it on in Settings to find computers on this network.",
     "noNearby": "Looking for computers running this app on your network…",
     "pair": "Pair",
+    "addresses": "IPv4 addresses",
+    "addressesHelp": "A Public network is listed only if Windows Firewall allows this app on it. Other computers reach this one through these addresses.",
+    "noAddresses": "No usable network. Allow this app in Windows Firewall on your network.",
+    "pairVia": "Pair using {{address}}",
+    "unreachable": "Unreachable",
+    "trust": "Trust",
+    "trustFull": "Full trust",
+    "trustVerify": "Ask each time",
+    "overwriteSilent": "Silent overwrite",
+    "overwriteAsk": "Ask before overwrite",
+    "disconnect": "Disconnect",
+    "block": "Block",
+    "unblock": "Unblock",
+    "blocked": "Blocked devices",
+    "noBlocked": "No blocked devices.",
+    "blockHelp": "A blocked device cannot connect to this computer. Its requests are dropped, and it only sees a connection failure. You can still see it in this list.",
     "manual": "Connect by address",
     "manualHelp": "Enter the IPv4 address and port of the other computer, as shown on its Devices page.",
     "address": "IPv4 address",
@@ -311,8 +411,18 @@
     "networkOff": "All network features are off. This computer is not reachable.",
     "incognitoOff": "Incognito is on. Discovery, sync and sharing are paused."
   },
-  "link": { "online": "Online", "pending": "Waiting for confirmation", "offline": "Offline", "failed": "Connection failed" },
-  "manual": { "dialing": "Connecting…", "connected": "Connected", "failed": "Connection failed", "badText": "That pairing text is not valid." },
+  "link": {
+    "online": "Online",
+    "pending": "Waiting for confirmation",
+    "offline": "Offline",
+    "failed": "Connection failed"
+  },
+  "manual": {
+    "dialing": "Connecting…",
+    "connected": "Connected",
+    "failed": "Connection failed",
+    "badText": "That pairing text is not valid."
+  },
   "relay": {
     "off": "Relay not set up",
     "connecting": "Connecting to relay…",
@@ -323,9 +433,17 @@
   "offer": {
     "title": "Pair with this device?",
     "body": "{{name}} wants to pair with this computer.",
-    "help": "Check that both screens show the same safety number before you confirm.",
-    "confirm": "Confirm",
-    "reject": "Reject"
+    "waiting": "Waiting for {{name}} to accept. Check that both screens show the same safety number.",
+    "help": "Check that both screens show the same safety number before you accept.",
+    "trustHelp": "Full trust reconnects on its own. Ask each time shows this prompt again before every later connection.",
+    "confirm": "Accept",
+    "reject": "Decline",
+    "cancel": "Cancel"
+  },
+  "overwrite": {
+    "body": "{{device}} wants to replace this computer's {{feature}}. It is left unchanged if you don't choose within {{seconds}} seconds.",
+    "keep": "Keep mine",
+    "take": "Use theirs"
   },
   "conflict": {
     "body": "{{feature}} changed on {{device}}, and this computer has changes that weren't synced.",
@@ -346,18 +464,22 @@
     "needFolderTitle": "Choose a downloads folder",
     "needFolderBody": "Downloaded songs are saved there and added to your library."
   },
-  "drop": { "title": "Drop to add music", "body": "Folders and audio files are added to your library." },
+  "drop": {
+    "title": "Drop to add music",
+    "body": "Folders and audio files are added to your library."
+  },
   "feature": {
     "favorites": "Liked Songs",
+    "appearance": "Appearance",
     "theme": "Theme",
     "language": "Language",
     "playlists": "Playlists",
-    "queue": "Queue",
     "history": "Recently Played"
   },
   "sync": {
     "feature": "What",
     "source": "Follow",
+    "sourceHelp": "After that device changes this, get its copy automatically. Auto send, above, is the other direction: your edits go out.",
     "everything": "All features",
     "globalHelp": "Applies to every row; rows can still differ",
     "blockManual": "No manual",
@@ -368,7 +490,6 @@
     "blockTimestampHelp": "Recently Played only: don't send or receive the UTC merge.",
     "blockAll": "Stop all",
     "blockAllHelp": "Stop syncing out and stop following. Manual syncs from others can still come in.",
-    "noSource": "Nobody (manual)",
     "thisDevice": "This computer",
     "utcMerge": "Merged by time",
     "manualOnly": "Manual overwrite",
@@ -379,6 +500,19 @@
     "sendBody_one": "This computer's copy replaces the one on {{count}} online device.",
     "sendBody_other": "This computer's copy replaces the one on {{count}} online devices.",
     "noneOnline": "No paired device is online",
+    "push": "Send",
+    "pull": "Override",
+    "pullChoose": "Overwrite from",
+    "pullDefault": "Default",
+    "pullTitle": "Replace this computer's {{feature}} with the copy from a connected device.",
+    "pullPlaylists": "Replace every playlist on this computer with that device's playlists.",
+    "requestNone": "None",
+    "thatDevice": "That device",
+    "pushTitle": "Send this computer's {{feature}} to every paired device that is online.",
+    "pushPlaylists": "Send every playlist on this computer, not only this one, to every paired device that is online.",
+    "pushOff": "Sync data is off. Turn it on in Settings, under Network.",
+    "pushIncognito": "Incognito is on, so nothing is sent.",
+    "pushBlocked": "Manual sync for this is turned off in Settings.",
     "dirty": "Has changes that weren't synced",
     "waiting": "Needs your choice"
   },
@@ -388,6 +522,13 @@
     "light": "Light",
     "dark": "Dark",
     "language": "Language",
+    "miniPlayer": "Mini player when minimized",
+    "miniPlayerHelp": "When this window is minimized, a small bar stays in the corner with the cover, playback, and favorite.",
+    "closeWindow": "When closing",
+    "closeWindowHelp": "\"Ask me\" shows the prompt every time. Minimizing to the tray keeps the player running in the background.",
+    "closeAsk": "Ask me",
+    "closeTray": "Minimize to tray",
+    "closeQuit": "Quit",
     "library": "Library",
     "playbackHelp": "Songs play from the original file without transcoding. Sound goes to the system's default output device.",
     "noFolders": "No folders or files added yet.",
@@ -408,6 +549,12 @@
     "historyCap": "Songs kept in Recently Played",
     "historyCapHelp": "Older entries are dropped. Between 1 and 10000.",
     "historyCapInvalid": "Enter a number between 1 and 10000.",
+    "historySync": "Sync recently played",
+    "historySyncHelp": "When a song finishes, this computer stamps it in UTC and sends the change. Another device updates its list only when it has this on too. The same timestamp on two songs is ordered either way.",
+    "historyStartup": "Merge when this computer comes online",
+    "historyStartupHelp": "On startup, collect Recently Played from every paired device that also syncs it, merge by time, then send that list. Devices with sync off ignore it quietly, with no notification.",
+    "historyPause": "Pause recording",
+    "historyPauseHelp": "Recently Played on this computer does not record songs that finish.",
     "historyMode": "Recently Played sync",
     "historyUtc": "Merge by time",
     "historyOverwrite": "Manual",
@@ -418,17 +565,39 @@
       "follow": "Pick a device below; this computer follows its list."
     },
     "incognito": "Incognito",
-    "incognitoHelp": "Nothing is added to Recently Played, and discovery, sync, relay and sharing pause.",
+    "incognitoHelp": "Nothing is added to Recently Played. This computer goes offline immediately and every device connection is cut.",
+    "silence": "Silence after a decline",
+    "silenceHelp": "After you decline a pairing request, that device cannot try again for this many seconds. You can still connect to it. Default is 60.",
+    "silenceInvalid": "Enter a number of seconds from 1 to 86400.",
+    "conflictPolicy": "When a sync conflicts",
+    "conflictPolicyHelp": "Shown when another device sends changes and this computer also has unsynced changes.",
+    "conflictAsk": "Ask me",
+    "conflictKeep": "Always keep mine",
+    "conflictTake": "Always use theirs",
+    "notices": "Notifications",
+    "noticeRead": "When a notification is marked read",
+    "noticeReadHelp": "The number on the bell counts notifications that are still unread.",
+    "noticeReadVisible": "As they scroll into view",
+    "noticeReadOpen": "When the panel opens",
+    "noticeReadClick": "Only when I open one",
+    "noticeClear": "When clearing notifications",
+    "noticeClearHelp": "Ask shows the choice each time. The other two run immediately.",
+    "noticeClearAsk": "Ask me",
+    "noticeClearUnpinned": "Delete all except pinned",
+    "noticeClearAll": "Delete all",
     "network": "Network",
-    "networkIncognito": "Incognito is on. These switches apply again once it is off.",
+    "networkIncognito": "Incognito is on. Discovery, playback position, and the relay apply again once it is off.",
+    "autoSend": "Auto send",
+    "autoSendHelp": "After you change a selected item on this computer, send that copy to every paired device that is online. This does not pull their changes. Follow, in Sync below, is what gets their copy.",
     "discovery": "Discover nearby devices",
-    "discoveryHelp": "Find and announce on the local network (mDNS). Shares only the device name, never song names.",
+    "discoveryHelp": "Announces this computer on the local network a few times a minute. Shares only the device name, never song names.",
     "syncEnabled": "Sync data",
-    "syncEnabledHelp": "Exchange liked songs, playlists, queue, history, theme and language with paired devices.",
+    "syncEnabledHelp": "Exchange liked songs, playlists, history, theme and language with paired devices.",
     "audioShare": "Share audio",
     "audioShareHelp": "Let paired devices see and play the songs you expose.",
-    "positionSync": "Sync playback position",
-    "positionSyncHelp": "When you pause or switch songs, paired devices can resume from the same spot.",
+    "positionSync": "Follow playback",
+    "positionSyncHelp": "The bar at the bottom follows the selected device. This computer stays silent, the button stays on play, and the progress bar moves with that device.",
+    "positionSyncOff": "Don't follow",
     "relay": "Relay (strelaysrv)",
     "relayHelp": "Connect to paired devices outside your network through your own relay. All four fields are required.",
     "relayHost": "Relay address",
@@ -437,17 +606,39 @@
     "relayIdHelp": "The relay's certificate ID, so this computer only talks to your relay.",
     "relayToken": "Relay token",
     "sync": "Sync",
-    "syncHelp": "With no device chosen, a feature stays on this computer until you press Sync. Choose a device and every online computer follows it.",
+    "syncHelp": "Send pushes this computer's copy to devices that are online. Override replaces this computer with one connected device. Follow, in the table, gets that device's later changes automatically.",
+    "requestDevice": "Default device to get from",
+    "requestDeviceHelp": "Override starts with this device marked. Each click still lets you pick any device that is connected.",
     "syncOffNote": "Sync data is off in Network, so nothing below is sent or received.",
     "storage": "Storage",
     "downloadFolder": "Downloads folder",
     "downloadFolderNone": "Not set. You'll be asked on the first download.",
-    "databasePath": "Database file",
-    "restartHelp": "Takes effect after a restart.",
     "lanPort": "LAN port",
-    "lanPortHelp": "0 picks a free port. Listening on {{port}} now.",
-    "portInvalid": "Enter a port between 1 and 65535.",
-    "deviceId": "Device ID"
+    "lanPortHelp": "Saved and reused on every start. Listening on {{port}} now.",
+    "portInvalid": "Enter a port between 1024 and 65535.",
+    "deviceId": "Device ID",
+    "about": "About",
+    "overwriteMode": "When others overwrite this computer",
+    "overwriteModeHelp": "Applies to Send from any paired device. Choose Silent to accept it at once, or Ask to confirm first.",
+    "portBusy": "That port is already in use. Pick another one.",
+    "portFallback": "Port {{saved}} is already in use. Listening on {{port}} for now. The saved port is unchanged and will be tried again next start."
+  },
+  "about": {
+    "name": "TunePeerly",
+    "version": "Version {{version}}",
+    "summary": "Plays the music on this computer and shares it with the devices you pair. Songs play from the original files.",
+    "license": "License",
+    "licenseName": "AGPL-3.0",
+    "licenseHelp": "You can use, share, and modify this app. If other people use a modified version over a network, its source code must be offered under the same license.",
+    "source": "Source code",
+    "sourceNote": "The complete source code is in this repository.",
+    "open": "Open",
+    "author": "Author",
+    "copyright": "© 2026 zhebuilds",
+    "privacy": "Privacy",
+    "privacyHelp": "There is no account. Your library, playlists, listening history, and pairing details stay on your own devices. Away from your local network, that data is sent through a relay server you configure, which only forwards it to your other devices. Devices encrypt it end to end with libsignal, so the relay cannot read it.",
+    "components": "Built with",
+    "componentsHelp": "Tauri, Rust, and React, along with other open-source components. Each of those projects keeps its own license."
   },
   "format": {
     "hoursMinutes": "{{hours}} hr {{minutes}} min",

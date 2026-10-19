@@ -3,10 +3,10 @@ import { useTranslation } from "react-i18next";
 import { api, type Track } from "../api";
 import { useApp } from "../app/model";
 import { Card, Shelf } from "../components/Card";
-import { Collage, Cover, LikedCover } from "../components/Cover";
+import { Cover, LikedCover } from "../components/Cover";
 import { TrackTable } from "../components/TrackTable";
 import { tintFor } from "../lib/format";
-import { covers, displayTitle, groupTracks } from "../lib/library";
+import { covers, displayTitle, groupTracks, pickCovers } from "../lib/library";
 import { Icons } from "../ui/icons";
 import { EmptyHint } from "./TrackListPage";
 
@@ -23,6 +23,7 @@ export function SearchPage({ scope: initialScope }: { scope?: string }) {
 
   useEffect(() => {
     setShowAll(false);
+    const mine = ++ticket.current;
     if (!query) {
       setResults(null);
       return;
@@ -32,7 +33,6 @@ export function SearchPage({ scope: initialScope }: { scope?: string }) {
       setResults(local);
       return;
     }
-    const mine = ++ticket.current;
     const timer = window.setTimeout(() => {
       void api
         .search(query)
@@ -79,7 +79,7 @@ export function SearchPage({ scope: initialScope }: { scope?: string }) {
             <section className="top-result">
               <h2>{t("search.top")}</h2>
               <div className="top-card" role="button" tabIndex={0} onClick={() => app.playList(results, 0, "search")} onKeyDown={(event) => {
-                if (event.key === "Enter") app.playList(results, 0, "search");
+                if (event.key === "Enter" && !(event.target as HTMLElement).closest("button, input, a, select, textarea")) app.playList(results, 0, "search");
               }}>
                 <Cover src={results[0].coverUrl} className="top-cover" />
                 <div className="top-title">{displayTitle(results[0], t("library.untitled"))}</div>
@@ -128,7 +128,7 @@ export function SearchPage({ scope: initialScope }: { scope?: string }) {
         <Shelf title={t("search.playlists")} rail>
           {playlists.map((playlist) => {
             const tracks = app.index.members(app.members[playlist.id] ?? []);
-            return <Card key={playlist.id} cover={<Collage covers={covers(tracks)} />} title={playlist.name} subtitle={t("list.songCount", { count: playlist.count })} onOpen={() => app.navigate({ name: "playlist", id: playlist.id })} onPlay={() => app.playAll(tracks, `playlist:${playlist.id}`)} />;
+            return <Card key={playlist.id} cover={<Cover src={covers(tracks, 1, `playlist:${playlist.id}`)[0]} />} title={playlist.name} subtitle={t("list.songCount", { count: playlist.count })} onOpen={() => app.navigate({ name: "playlist", id: playlist.id })} onPlay={() => app.playAll(tracks, `playlist:${playlist.id}`)} />;
           })}
         </Shelf>
       )}
@@ -139,14 +139,21 @@ export function SearchPage({ scope: initialScope }: { scope?: string }) {
 function BrowseTiles() {
   const { t } = useTranslation();
   const app = useApp();
+  const albumArt = useMemo(() => pickCovers(groupTracks(app.library, "album").map((group) => group.cover), 2, "browse-albums"), [app.library]);
+  const artistArt = useMemo(() => pickCovers(groupTracks(app.library, "artist").map((group) => group.cover), 2, "browse-artists"), [app.library]);
+  const folderArt = useMemo(() => pickCovers(groupTracks(app.library, "folder").map((group) => group.cover), 2, "browse-folders"), [app.library]);
+  const likedArt = useMemo(() => pickCovers(app.liked.map((track) => track.coverUrl), 2, "browse-liked"), [app.liked]);
+  const recentArt = useMemo(() => pickCovers(app.recent.map((track) => track.coverUrl), 2, "browse-recent"), [app.recent]);
+  const allArt = useMemo(() => pickCovers(app.library.map((track) => track.coverUrl), 2, "browse-all"), [app.library]);
+  const deviceArt = useMemo(() => pickCovers(app.library.filter((track) => track.badge === "remote").map((track) => track.coverUrl), 2, "browse-devices"), [app.library]);
   const tiles = [
-    { label: t("nav.allMusic"), go: () => app.navigate({ name: "library" }), icon: <Icons.music /> },
-    { label: t("nav.liked"), go: () => app.navigate({ name: "liked" }), icon: <LikedCover className="tile-art" /> },
-    { label: t("nav.recent"), go: () => app.navigate({ name: "recent" }), icon: <Icons.clock /> },
-    { label: t("nav.artists"), go: () => app.navigate({ name: "artists" }), icon: <Icons.artist /> },
-    { label: t("nav.albums"), go: () => app.navigate({ name: "albums" }), icon: <Icons.album /> },
-    { label: t("nav.folders"), go: () => app.navigate({ name: "folders" }), icon: <Icons.folder /> },
-    { label: t("nav.devices"), go: () => app.navigate({ name: "devices" }), icon: <Icons.devices /> },
+    { key: "all", label: t("nav.allMusic"), go: () => app.navigate({ name: "library" }), images: allArt, icon: <Icons.music /> },
+    { key: "liked", label: t("nav.liked"), go: () => app.navigate({ name: "liked" }), images: likedArt, icon: <LikedCover /> },
+    { key: "recent", label: t("nav.recent"), go: () => app.navigate({ name: "recent" }), images: recentArt, icon: <Icons.clock /> },
+    { key: "artists", label: t("nav.artists"), go: () => app.navigate({ name: "artists" }), images: artistArt, icon: <Icons.artist /> },
+    { key: "albums", label: t("nav.albums"), go: () => app.navigate({ name: "albums" }), images: albumArt, icon: <Icons.album /> },
+    { key: "folders", label: t("nav.folders"), go: () => app.navigate({ name: "folders" }), images: folderArt, icon: <Icons.folder /> },
+    { key: "devices", label: t("nav.devices"), go: () => app.navigate({ name: "devices" }), images: deviceArt, icon: <Icons.devices /> },
   ];
   return (
     <section className="shelf">
@@ -155,9 +162,11 @@ function BrowseTiles() {
       </div>
       <div className="browse-tiles">
         {tiles.map((tile) => (
-          <button type="button" key={tile.label} className="browse-tile" style={{ background: tintFor(tile.label) }} onClick={tile.go}>
+          <button type="button" key={tile.key} className="browse-tile" style={{ background: tintFor(tile.key) }} onClick={tile.go}>
             <span>{tile.label}</span>
-            <span className="browse-icon">{tile.icon}</span>
+            <span className="browse-icon">
+              {tile.images.length > 0 ? tile.images.map((src) => <Cover key={src} src={src} />) : tile.icon}
+            </span>
           </button>
         ))}
       </div>

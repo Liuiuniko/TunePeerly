@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { api, pickFolder } from "../api";
 import { useApp } from "../app/model";
+import { Select } from "./controls";
 import { Icons } from "../ui/icons";
 
 export function Overlays({ dropping }: { dropping: boolean }) {
@@ -30,42 +31,81 @@ function Toasts() {
   );
 }
 
+const VISIBLE_BANNERS = 3;
+
 export function Banners() {
   const { t } = useTranslation();
   const app = useApp();
   const pending = app.boot?.pending ?? [];
+  const asks = app.overwriteAsks;
   const sourceName = (id: string | null) => (id ? app.boot?.links.find((link) => link.deviceId === id)?.name ?? id.slice(0, 7) : "");
-  if (!app.notice && pending.length === 0) return null;
+  const rows = [
+    ...asks.map((ask) => ({ key: `ask-${ask.id}`, kind: "ask" as const, ask })),
+    ...pending.map((item) => ({ key: `conflict-${item.feature}`, kind: "conflict" as const, item })),
+    ...app.alerts.map((item) => ({ key: `alert-${item.id}`, kind: "alert" as const, item })),
+  ].slice(0, VISIBLE_BANNERS);
+  if (rows.length === 0) return null;
   return (
     <div className="banners">
-      {pending.map((item) => (
-        <div key={item.feature} className="banner conflict" role="alert">
-          <Icons.sync />
-          <span>{t("conflict.body", { feature: t(`feature.${item.feature}`), device: sourceName(item.source) })}</span>
-          <div className="button-row">
-            <button type="button" className="btn ghost small" onClick={() => void api.network("resolve", { feature: item.feature, take: false }).then(app.scheduleRefresh).catch(app.say)}>
-              {t("conflict.keep")}
-            </button>
-            <button type="button" className="btn primary small" onClick={() => void api.network("resolve", { feature: item.feature, take: true }).then(app.scheduleRefresh).catch(app.say)}>
-              {t("conflict.take")}
-            </button>
-          </div>
-        </div>
-      ))}
-      {app.notice && (
-        <div className="banner notice" role="alert">
-          <Icons.warning />
-          <span>{app.notice}</span>
-          <button type="button" className="icon-btn small" aria-label={t("common.close")} onClick={() => app.setNotice(null)}>
-            <Icons.close />
-          </button>
-        </div>
-      )}
+      {rows.map((row) => {
+        if (row.kind === "ask") {
+          const ask = row.ask;
+          return (
+            <div key={row.key} className="banner conflict" role="alert">
+              <Icons.sync />
+              <span>{t("overwrite.body", { feature: t(`feature.${ask.feature}`), device: ask.name || ask.deviceId.slice(0, 7), seconds: ask.remaining })}</span>
+              <div className="button-row">
+                <button type="button" className="btn ghost small" onClick={() => void api.network("resolve-overwrite", { id: ask.id, accept: false }).then(app.scheduleRefresh).catch(app.say)}>
+                  {t("overwrite.keep")}
+                </button>
+                <button type="button" className="btn primary small" onClick={() => void api.network("resolve-overwrite", { id: ask.id, accept: true }).then(app.scheduleRefresh).catch(app.say)}>
+                  {t("overwrite.take")}
+                </button>
+              </div>
+            </div>
+          );
+        }
+        if (row.kind === "conflict") {
+          const item = row.item;
+          return (
+            <div key={row.key} className="banner conflict" role="alert">
+              <Icons.sync />
+              <span>{t("conflict.body", { feature: t(`feature.${item.feature}`), device: sourceName(item.source) })}</span>
+              <div className="button-row">
+                <button type="button" className="btn ghost small" onClick={() => void api.network("resolve", { feature: item.feature, take: false }).then(app.scheduleRefresh).catch(app.say)}>
+                  {t("conflict.keep")}
+                </button>
+                <button type="button" className="btn primary small" onClick={() => void api.network("resolve", { feature: item.feature, take: true }).then(app.scheduleRefresh).catch(app.say)}>
+                  {t("conflict.take")}
+                </button>
+              </div>
+            </div>
+          );
+        }
+        return <TimedAlert key={row.key} id={row.item.id} text={row.item.text} onClose={app.dismissAlert} />;
+      })}
     </div>
   );
 }
 
-function Modal({ children, onClose, label }: { children: ReactNode; onClose: () => void; label: string }) {
+function TimedAlert({ id, text, onClose }: { id: number; text: string; onClose: (id: number) => void }) {
+  const { t } = useTranslation();
+  useEffect(() => {
+    const timer = window.setTimeout(() => onClose(id), 10000);
+    return () => window.clearTimeout(timer);
+  }, [id, onClose]);
+  return (
+    <div className="banner notice" role="alert">
+      <Icons.warning />
+      <span>{text}</span>
+      <button type="button" className="icon-btn small" aria-label={t("common.close")} onClick={() => onClose(id)}>
+        <Icons.close />
+      </button>
+    </div>
+  );
+}
+
+export function Modal({ children, onClose, label }: { children: ReactNode; onClose: () => void; label: string }) {
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
@@ -158,9 +198,20 @@ function OfferDialog() {
   const { t } = useTranslation();
   const app = useApp();
   const offer = app.boot?.offer;
+  const answering = useRef(false);
+  const [trust, setTrust] = useState("full");
   if (!offer) return null;
+  const incoming = offer.role !== "outgoing";
+  const name = offer.name || offer.deviceId.slice(0, 7);
   const groups = offer.safetyNumber.replace(/\s+/g, "").match(/.{1,5}/g) ?? [offer.safetyNumber];
-  const answer = (action: "confirm" | "reject") => void api.network(action, offer.deviceId).then(app.scheduleRefresh).catch(app.say);
+  const answer = (action: "confirm" | "reject") => {
+    if (answering.current) return;
+    answering.current = true;
+    const payload = action === "confirm" ? { deviceId: offer.deviceId, trust } : offer.deviceId;
+    void api.network(action, payload).then(app.scheduleRefresh).catch(app.say).finally(() => {
+      answering.current = false;
+    });
+  };
   return (
     <Modal onClose={() => answer("reject")} label={t("offer.title")}>
       <div className="offer">
@@ -168,20 +219,33 @@ function OfferDialog() {
           <Icons.link />
         </div>
         <h2 className="modal-title">{t("offer.title")}</h2>
-        <p className="modal-body">{t("offer.body", { name: offer.name || offer.deviceId.slice(0, 7) })}</p>
+        <p className="modal-body">{incoming ? t("offer.body", { name }) : t("offer.waiting", { name })}</p>
         <div className="safety-number mono">
           {groups.map((group, at) => (
-            <span key={at}>{group}</span>
+            <span key={`${at}-${group}`}>{group}</span>
           ))}
         </div>
         <p className="setting-help">{t("offer.help")}</p>
+        {incoming && (
+          <Select
+            label={t("devices.trust")}
+            value={trust}
+            onChange={setTrust}
+            options={[
+              { value: "full", label: t("devices.trustFull"), hint: t("offer.trustHelp") },
+              { value: "verify", label: t("devices.trustVerify"), hint: t("offer.trustHelp") },
+            ]}
+          />
+        )}
         <div className="modal-actions">
           <button type="button" className="btn ghost" onClick={() => answer("reject")}>
-            {t("offer.reject")}
+            {incoming ? t("offer.reject") : t("offer.cancel")}
           </button>
-          <button type="button" className="btn primary" onClick={() => answer("confirm")}>
-            {t("offer.confirm")}
-          </button>
+          {incoming && (
+            <button type="button" className="btn primary" onClick={() => answer("confirm")}>
+              {t("offer.confirm")}
+            </button>
+          )}
         </div>
       </div>
     </Modal>

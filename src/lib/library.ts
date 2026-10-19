@@ -49,6 +49,23 @@ export function displayTitle(track: Track, untitled: string): string {
   return track.title || track.fileName || untitled;
 }
 
+/** Moves one visible row, leaving hidden rows in their places. `from` and `to` count only visible rows. */
+export function reorderVisible<T>(items: T[], visible: (item: T) => boolean, from: number, to: number): T[] {
+  const slots: number[] = [];
+  items.forEach((item, index) => {
+    if (visible(item)) slots.push(index);
+  });
+  if (from < 0 || to < 0 || from >= slots.length || to >= slots.length || from === to) return items;
+  const shown = slots.map((index) => items[index]);
+  const [moved] = shown.splice(from, 1);
+  shown.splice(to, 0, moved);
+  const next = items.slice();
+  slots.forEach((index, at) => {
+    next[index] = shown[at];
+  });
+  return next;
+}
+
 export function sortTracks(tracks: Track[], sort: Sort): Track[] {
   if (sort.key === "order") return sort.dir === 1 ? tracks : tracks.slice().reverse();
   const value = (track: Track): string | number => {
@@ -90,18 +107,36 @@ export function filterText(tracks: Track[], text: string): Track[] {
 
 export type Group = { name: string; tracks: Track[]; cover: string | null };
 
+let coverSeed = Math.floor(Math.random() * 0x7fffffff) || 1;
+
+/** The next refresh of the interface picks a different cover for each collection. */
+export function reshuffleCovers() {
+  coverSeed = Math.floor(Math.random() * 0x7fffffff) || 1;
+}
+
+function mix(seed: number, value: string): number {
+  let hash = seed >>> 0;
+  for (let index = 0; index < value.length; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 0x5bd1e995);
+  return hash >>> 0;
+}
+
 export function groupTracks(tracks: Track[], field: "artist" | "album" | "folder"): Group[] {
-  const groups = new Map<string, Group>();
+  const groups = new Map<string, Group & { rank: number }>();
   for (const track of tracks) {
     const name = track[field] || "";
     if (field === "folder" && !name) continue;
     let group = groups.get(name);
     if (!group) {
-      group = { name, tracks: [], cover: null };
+      group = { name, tracks: [], cover: null, rank: 0 };
       groups.set(name, group);
     }
     group.tracks.push(track);
-    if (!group.cover && track.coverUrl) group.cover = track.coverUrl;
+    if (!track.coverUrl) continue;
+    const rank = mix(coverSeed, `${name}\0${track.coverUrl}`);
+    if (!group.cover || rank < group.rank) {
+      group.cover = track.coverUrl;
+      group.rank = rank;
+    }
   }
   return [...groups.values()].sort((a, b) => {
     if (!a.name) return 1;
@@ -110,13 +145,22 @@ export function groupTracks(tracks: Track[], field: "artist" | "album" | "folder
   });
 }
 
-export function covers(tracks: Track[], limit = 4): string[] {
-  const out: string[] = [];
-  for (const track of tracks) {
-    if (track.coverUrl && !out.includes(track.coverUrl)) out.push(track.coverUrl);
-    if (out.length >= limit) break;
+/** Up to `limit` different covers. `salt` keeps two lists from picking the same ones. The choice changes when `reshuffleCovers` runs. */
+export function pickCovers(urls: (string | null | undefined)[], limit = 4, salt = ""): string[] {
+  const unique: string[] = [];
+  for (const url of urls) {
+    if (url && !unique.includes(url)) unique.push(url);
   }
-  return out;
+  if (unique.length <= limit) return unique;
+  return unique
+    .map((url) => ({ url, rank: mix(coverSeed, `${salt}\0${url}`) }))
+    .sort((a, b) => a.rank - b.rank || (a.url < b.url ? -1 : 1))
+    .slice(0, limit)
+    .map((item) => item.url);
+}
+
+export function covers(tracks: Track[], limit = 4, salt = ""): string[] {
+  return pickCovers(tracks.map((track) => track.coverUrl), limit, salt);
 }
 
 export function folderName(path: string): string {

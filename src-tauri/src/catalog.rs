@@ -34,6 +34,7 @@ struct LocalRow {
 pub fn library(db: &Db, online: &[String]) -> AppResult<Value> {
     let local = load_local(db)?;
     let holdings = load_holdings(db)?;
+    let remote_covers = load_remote_covers(db)?;
     let online: HashSet<&str> = online.iter().map(String::as_str).collect();
     let mut tracks = Vec::new();
     let mut seen_content = HashSet::new();
@@ -64,6 +65,9 @@ pub fn library(db: &Db, online: &[String]) -> AppResult<Value> {
         };
         let source = readable.copied().unwrap_or(rows[0]);
         let mut stub = stub_from_local(source, &holders, badge);
+        if stub.cover_url.is_none() {
+            stub.cover_url = remote_covers.get(content_id).cloned();
+        }
         // A readable local copy is always retried, even after a confirmed decode failure.
         stub.playable = (badge == "local" && !source.video && source.access_status == "available")
             || (badge == "remote" && !unplayable);
@@ -109,15 +113,29 @@ pub fn library(db: &Db, online: &[String]) -> AppResult<Value> {
             playback_status: "untried".into(),
             reason_key: if badge == "unavailable" { Some("file.missing".into()) } else { None },
             video: false,
-            cover_url: None,
+            cover_url: remote_covers.get(&holding.content_id).cloned(),
             absolute_path: None,
             holder_ids: holders,
             playable: badge == "remote",
             dimmed: badge == "unavailable",
         });
     }
-    tracks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    let positions = db.library_positions()?;
+    tracks.sort_by(|a, b| match (order_position(a, &positions), order_position(b, &positions)) {
+        (Some(left), Some(right)) => left.cmp(&right).then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+    });
     Ok(json!(tracks))
+}
+
+fn order_position(track: &TrackStub, positions: &HashMap<String, i64>) -> Option<i64> {
+    track
+        .content_id
+        .as_ref()
+        .and_then(|id| positions.get(id).copied())
+        .or_else(|| track.local_file_id.as_ref().and_then(|id| positions.get(id).copied()))
 }
 
 fn stub_from_local(row: &LocalRow, holders: &[String], badge: &str) -> TrackStub {
@@ -243,7 +261,7 @@ fn load_local(db: &Db) -> AppResult<Vec<LocalRow>> {
 }
 
 pub fn local_publishable(db: &Db) -> AppResult<Vec<crate::db::HoldingInput>> {
-    if !db.setting_bool("audioShare")? {
+    if db.setting_bool("incognito").unwrap_or(false) {
         return Ok(Vec::new());
     }
     let mut stmt = db.conn.prepare(
@@ -336,4 +354,61 @@ pub fn search(db: &Db, query: &str, online: &[String]) -> AppResult<Value> {
 #[allow(dead_code)]
 pub fn cover_file(path: &str) -> Option<String> {
     Some(path.to_string())
+}
+
+/// Cover pictures of exposed, readable local copies of this content.
+pub fn cover_paths(db: &Db, content_id: &str) -> AppResult<Vec<(String, String)>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT local_file_id, cover_path FROM local_files
+         WHERE content_id = ?1 AND exposed = 1 AND access_status = 'available' AND cover_path IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![content_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// True while a local copy has not been checked for an embedded picture yet.
+pub fn cover_pending(db: &Db, content_id: &str) -> bool {
+    db.conn
+        .query_row(
+            "SELECT COUNT(*) FROM local_files WHERE content_id = ?1 AND exposed = 1 AND cover_checked = 0",
+            params![content_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false)
+}
+
+/// Content ids held by this device that have no picture here yet and were not tried recently.
+pub fn missing_covers(db: &Db, device_id: &str, retry_before: i64) -> AppResult<Vec<String>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT h.content_id FROM holdings h
+         WHERE h.device_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM remote_covers c WHERE c.content_id = h.content_id AND (c.path IS NOT NULL OR c.tried_at > ?2))
+           AND NOT EXISTS (SELECT 1 FROM local_files f WHERE f.content_id = h.content_id AND f.cover_path IS NOT NULL)
+         LIMIT 2000",
+    )?;
+    let rows = stmt.query_map(params![device_id, retry_before], |row| row.get(0))?;
+    Ok(rows.collect::<Result<Vec<String>, _>>()?)
+}
+
+pub fn save_remote_cover(db: &Db, content_id: &str, path: Option<&str>) -> AppResult<()> {
+    db.conn.execute(
+        "INSERT INTO remote_covers(content_id, path, tried_at) VALUES(?1, ?2, ?3)
+         ON CONFLICT(content_id) DO UPDATE SET path = excluded.path, tried_at = excluded.tried_at",
+        params![content_id, path, chrono::Utc::now().timestamp()],
+    )?;
+    Ok(())
+}
+
+fn load_remote_covers(db: &Db) -> AppResult<HashMap<String, String>> {
+    let mut stmt = db.conn.prepare("SELECT content_id, path FROM remote_covers WHERE path IS NOT NULL")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (id, path) = row?;
+        if std::path::Path::new(&path).exists() {
+            map.insert(id, path);
+        }
+    }
+    Ok(map)
 }

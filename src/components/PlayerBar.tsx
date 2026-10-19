@@ -1,6 +1,7 @@
-import { useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
-import { useApp } from "../app/model";
+import { api, type Track } from "../api";
+import { useApp, type PlaybackMirror } from "../app/model";
 import { coverSrc, Cover } from "./Cover";
 import { clockText } from "../lib/format";
 import { displayTitle, trackKey } from "../lib/library";
@@ -10,14 +11,22 @@ import { Icons } from "../ui/icons";
 export function PlayerBar() {
   const { t } = useTranslation();
   const app = useApp();
-  const track = app.current;
   const { playing } = useSyncExternalStore(transport.subscribe, transport.get);
+  const followId = String(app.settings.positionSyncDevice ?? "");
+  const mirror = followId && app.mirror?.deviceId === followId ? app.mirror : null;
+  const track = mirror ? followedTrack(mirror, app.tracks) : app.current;
   const order = app.queue.order;
   const repeat = app.queue.repeat;
-  const failed = Boolean(track && app.failure?.key === trackKey(track));
-  const remoteName = app.engine.remoteDevice ? app.boot?.links.find((link) => link.deviceId === app.engine.remoteDevice)?.name : null;
+  const failed = Boolean(!mirror && track && app.failure?.key === trackKey(track));
+  const remoteName = mirror
+    ? app.boot?.links.find((link) => link.deviceId === mirror.deviceId)?.name
+    : app.engine.remoteDevice
+      ? app.boot?.links.find((link) => link.deviceId === app.engine.remoteDevice)?.name
+      : null;
+  const showPlaying = playing && !mirror;
 
   useMediaSession();
+  useDesktopNowPlaying();
 
   return (
     <footer className="player-bar">
@@ -58,20 +67,20 @@ export function PlayerBar() {
           <button type="button" className={`icon-btn${order !== "manual" ? " on" : ""}`} aria-pressed={order !== "manual"} aria-label={t("player.shuffle")} title={order === "libraryRandom" ? t("player.libraryRandom") : t("player.shuffle")} onClick={app.toggleShuffle}>
             <Icons.shuffle />
           </button>
-          <button type="button" className="icon-btn" aria-label={t("player.previous")} title={t("player.previousShortcut")} onClick={app.previous} disabled={!track}>
+          <button type="button" className="icon-btn" aria-label={t("player.previous")} title={t("player.previousShortcut")} onClick={() => { if (!mirror) app.previous(); }} disabled={!track}>
             <Icons.prev />
           </button>
-          <button type="button" className="play-btn" aria-label={playing ? t("player.pause") : t("player.play")} title={t("player.playShortcut")} onClick={app.toggle} disabled={!track && app.library.length === 0 && app.queue.future.length === 0}>
-            {playing ? <Icons.pause /> : <Icons.play />}
+          <button type="button" className="play-btn" aria-label={showPlaying ? t("player.pause") : t("player.play")} title={t("player.playShortcut")} onClick={() => { if (!mirror) app.toggle(); }} disabled={!track && app.library.length === 0 && app.queue.future.length === 0}>
+            {showPlaying ? <Icons.pause /> : <Icons.play />}
           </button>
-          <button type="button" className="icon-btn" aria-label={t("player.next")} title={t("player.nextShortcut")} onClick={app.next} disabled={!track}>
+          <button type="button" className="icon-btn" aria-label={t("player.next")} title={t("player.nextShortcut")} onClick={() => { if (!mirror) app.next(); }} disabled={!track}>
             <Icons.next />
           </button>
           <button type="button" className={`icon-btn${repeat !== "off" ? " on" : ""}`} aria-label={t(`player.repeat.${repeat}`)} title={t(`player.repeat.${repeat}`)} onClick={app.cycleRepeat}>
             {repeat === "one" ? <Icons.repeatOne /> : <Icons.repeat />}
           </button>
         </div>
-        <Seek disabled={!track} fallback={(track?.durationMs ?? 0) / 1000} />
+        <Seek disabled={!track} fallback={(track?.durationMs ?? 0) / 1000} mirror={mirror} />
       </div>
 
       <div className="player-right">
@@ -82,21 +91,66 @@ export function PlayerBar() {
           <Icons.queue />
         </button>
         <Volume />
+        <button type="button" className={`icon-btn notice-btn${app.noticesOpen ? " on" : ""}`} aria-label={t("player.notices")} title={t("player.notices")} aria-pressed={app.noticesOpen} onClick={() => app.setNoticesOpen(!app.noticesOpen)}>
+          <Icons.bell />
+          {app.unreadNotices > 0 && <span className="notice-badge">{app.unreadNotices > 99 ? "99+" : app.unreadNotices}</span>}
+        </button>
       </div>
     </footer>
   );
 }
 
-function Seek({ disabled, fallback }: { disabled: boolean; fallback: number }) {
+function followedTrack(mirror: PlaybackMirror, tracks: Track[]): Track {
+  const found = tracks.find((track) => track.contentId && track.contentId === mirror.contentId);
+  if (found) return found;
+  return {
+    contentId: mirror.contentId,
+    localFileId: null,
+    title: mirror.title,
+    artist: mirror.artist,
+    album: mirror.album,
+    trackNumber: null,
+    durationMs: mirror.duration > 0 ? Math.round(mirror.duration * 1000) : null,
+    folder: "",
+    fileName: "",
+    addedAt: "",
+    favorite: false,
+    exposed: false,
+    badge: "remote",
+    accessStatus: "",
+    metadataStatus: "",
+    playbackStatus: "",
+    reasonKey: null,
+    video: false,
+    coverUrl: null,
+    absolutePath: null,
+    holderIds: [mirror.deviceId],
+    playable: false,
+    dimmed: false,
+  };
+}
+
+function Seek({ disabled, fallback, mirror }: { disabled: boolean; fallback: number; mirror: PlaybackMirror | null }) {
   const { t } = useTranslation();
   const app = useApp();
   const time = useSyncExternalStore(clock.subscribe, clock.get);
   const [scrub, setScrub] = useState<number | null>(null);
   const [remaining, setRemaining] = useState(() => localStorage.getItem("showRemaining") === "1");
-  const duration = time.duration > 0 ? time.duration : fallback;
-  const position = scrub ?? Math.min(time.position, duration || time.position);
+  const [now, setNow] = useState(() => performance.now());
+  useEffect(() => {
+    if (!mirror?.playing) return;
+    const timer = window.setInterval(() => setNow(performance.now()), 200);
+    return () => window.clearInterval(timer);
+  }, [mirror?.playing, mirror?.at]);
+  const duration = mirror ? (mirror.duration > 0 ? mirror.duration : fallback) : time.duration > 0 ? time.duration : fallback;
+  const mirrored = mirror ? mirror.seconds + (mirror.playing ? Math.max(0, now - mirror.at) / 1000 : 0) : null;
+  const position = mirrored !== null ? Math.min(Math.max(0, mirrored), duration || mirrored) : scrub ?? Math.min(time.position, duration || time.position);
   const fill = duration > 0 ? (position / duration) * 100 : 0;
   const commit = () => {
+    if (mirror) {
+      setScrub(null);
+      return;
+    }
     if (scrub !== null) app.engine.seek(scrub);
     setScrub(null);
   };
@@ -113,7 +167,9 @@ function Seek({ disabled, fallback }: { disabled: boolean; fallback: number }) {
         disabled={disabled || duration <= 0}
         aria-label={t("player.seek")}
         style={{ "--fill": `${fill}%` } as CSSProperties}
-        onChange={(event) => setScrub(Number(event.target.value))}
+        onChange={(event) => {
+          if (!mirror) setScrub(Number(event.target.value));
+        }}
         onPointerUp={commit}
         onKeyUp={commit}
         onBlur={() => scrub !== null && commit()}
@@ -138,13 +194,22 @@ function Volume() {
   const app = useApp();
   const level = app.muted ? 0 : app.volume;
   const Icon = level === 0 ? Icons.volumeMute : level < 0.5 ? Icons.volumeLow : Icons.volume;
+  const box = useRef<HTMLDivElement>(null);
+  const latest = useRef(app);
+  latest.current = app;
+  useEffect(() => {
+    const node = box.current;
+    if (!node) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const model = latest.current;
+      model.setVolume(model.volume + (event.deltaY < 0 ? 0.05 : -0.05));
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, []);
   return (
-    <div
-      className="volume"
-      onWheel={(event) => {
-        app.setVolume(app.volume + (event.deltaY < 0 ? 0.05 : -0.05));
-      }}
-    >
+    <div className="volume" ref={box}>
       <button type="button" className="icon-btn" aria-label={app.muted ? t("player.unmute") : t("player.mute")} title={app.muted ? t("player.unmute") : t("player.mute")} onClick={app.toggleMute}>
         <Icon />
       </button>
@@ -162,6 +227,38 @@ function Volume() {
       />
     </div>
   );
+}
+
+function useDesktopNowPlaying() {
+  const { t, i18n } = useTranslation();
+  const app = useApp();
+  const { playing } = useSyncExternalStore(transport.subscribe, transport.get);
+  const time = useSyncExternalStore(clock.subscribe, clock.get);
+  const track = app.current;
+  const second = Math.floor(time.position);
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const cover = track?.coverUrl && !/^(data:|blob:|https?:)/.test(track.coverUrl) ? track.coverUrl : null;
+    void api.desktopUpdate({
+      title: track ? displayTitle(track, t("library.untitled")) : "",
+      artist: track?.artist ?? "",
+      album: track?.album ?? "",
+      coverPath: cover,
+      playing: Boolean(track) && playing,
+      favorite: Boolean(track?.favorite),
+      duration: time.duration || (track?.durationMs ?? 0) / 1000,
+      position: time.position,
+      theme: document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+      language: i18n.language.startsWith("zh") ? "zh" : "en",
+      tips: {
+        previous: t("player.previous"),
+        play: t("player.play"),
+        pause: t("player.pause"),
+        next: t("player.next"),
+        like: t("menu.like"),
+      },
+    }).catch(() => {});
+  }, [track, playing, second, time.duration, i18n.language, t]);
 }
 
 function useMediaSession() {

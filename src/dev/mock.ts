@@ -100,8 +100,8 @@ sync();
 const links: Link[] = empty
   ? []
   : [
-      { deviceId: "dev-studio", name: "Studio PC", state: "online", path: "lan", detail: "outgoing" },
-      { deviceId: "dev-laptop", name: "Travel Laptop", state: "offline", path: "", detail: "" },
+      { deviceId: "dev-studio", name: "Studio PC", state: "online", path: "lan", detail: "outgoing", trust: "full" },
+      { deviceId: "dev-laptop", name: "Travel Laptop", state: "offline", path: "", detail: "", trust: "verify" },
     ];
 
 const lrc = `[ti:Morning Light]
@@ -125,6 +125,7 @@ const settings: Record<string, unknown> = {
   syncBlocks: { history: { timestamp: true } },
   exposeDefault: "hide",
   positionSync: false,
+  positionSyncDevice: "",
   downloadFolder: "",
   volume: 0.8,
   relayHost: "",
@@ -134,24 +135,55 @@ const settings: Record<string, unknown> = {
   discovery: true,
   syncEnabled: true,
   audioShare: true,
+  autoSend: {},
   displayName: "Desk PC",
+  listenPort: 22000,
   manualAddresses: ["192.168.1.24:22000"],
   dirty: { playlists: true },
 };
 
 const state = {
-  theme: params.has("dark") ? "dark" : "light",
+  theme: params.has("light") ? "light" : "dark",
   language: params.get("lang") === "zh" ? "zh" : "en",
   player: {} as Record<string, unknown>,
   history: tracks.slice(0, 9).filter((track) => track.playable).map(key),
   pending: params.has("conflict") ? [{ feature: "favorites", source: "dev-studio" }] : [],
-  offer: params.has("offer") ? { deviceId: "dev-new", name: "Living Room", safetyNumber: "12345 67890 24680 13579 11223 34455 66778 89900" } : null,
+  offer: params.has("offer") ? { deviceId: "dev-new", name: "Living Room", safetyNumber: "12345 67890 24680 13579 11223 34455 66778 89900", role: "incoming" as const } : null,
+  blocks: [] as Bootstrap["blocks"],
+  notices: [
+    { id: 2, at: "2026-10-18T14:02:00.000Z", kind: "connected", deviceId: "dev-studio", name: "Studio PC", detail: "lan", read: false, pinned: false },
+    { id: 1, at: "2026-10-18T13:40:00.000Z", kind: "paired", deviceId: "dev-laptop", name: "Travel Laptop", detail: "full", read: false, pinned: true },
+  ] as NonNullable<Bootstrap["notices"]>,
+  failures: {} as Bootstrap["failures"],
   download: null as Bootstrap["download"],
   manual: null as string | null,
 };
 
 function emit(event: string, payload: unknown = {}) {
   for (const id of listeners.get(event) ?? []) callbacks.get(id)?.({ event, id, payload });
+}
+
+let playbackPreview = 0;
+function previewPlayback(deviceId: string) {
+  window.clearInterval(playbackPreview);
+  if (!deviceId) return;
+  const song = tracks.find((track) => track.playable);
+  if (!song) return;
+  const started = Date.now();
+  const send = () => {
+    emit("playback-mirror", {
+      deviceId,
+      contentId: song.contentId,
+      seconds: 20 + (Date.now() - started) / 1000,
+      playing: true,
+      duration: (song.durationMs ?? 180000) / 1000,
+      title: song.title,
+      artist: song.artist,
+      album: song.album,
+    });
+  };
+  send();
+  playbackPreview = window.setInterval(send, 1000);
 }
 
 const audio = new Map<string, string>();
@@ -194,6 +226,23 @@ function toneUrl(seed: string, seconds: number): string {
   return url;
 }
 
+let libraryOrder: string[] | null = null;
+
+function orderedLibrary(): Track[] {
+  const copy = structuredClone(tracks);
+  if (!libraryOrder) return copy;
+  const rank = new Map(libraryOrder.map((key, index) => [key, index]));
+  const keyOf = (track: Track) => track.contentId ?? track.localFileId ?? "";
+  return copy.sort((left, right) => {
+    const a = rank.get(keyOf(left));
+    const b = rank.get(keyOf(right));
+    if (a === undefined && b === undefined) return 0;
+    if (a === undefined) return 1;
+    if (b === undefined) return -1;
+    return a - b;
+  });
+}
+
 function bootstrap(): Bootstrap {
   sync();
   return {
@@ -209,15 +258,19 @@ function bootstrap(): Bootstrap {
     player: structuredClone(state.player),
     history: [...state.history],
     pending: structuredClone(state.pending) as Bootstrap["pending"],
-    tracks: structuredClone(tracks),
-    config: { database_path: "C:\\Users\\me\\AppData\\Roaming\\MultiDeviceMusicPlayer\\library.db", listen_port: 22000 },
-    listenPort: 22000,
-    nearby: empty ? [] : [{ deviceId: "dev-living", name: "Living Room", host: "192.168.1.31", port: 22000 }],
+    tracks: orderedLibrary(),
+    listenPort: params.has("portbusy") ? 22111 : 22000,
+    portFallback: params.has("portbusy") ? 22000 : null,
+    localAddresses: ["192.168.1.20", "10.0.0.8"],
+    nearby: empty ? [] : [{ deviceId: "dev-living", name: "Living Room", host: "192.168.1.31", hosts: ["192.168.1.31", "10.0.0.31"], port: 22000 }],
     links: structuredClone(links),
     relay: "",
     offer: state.offer,
     download: state.download,
     manual: state.manual,
+    failures: state.failures,
+    blocks: state.blocks,
+    notices: state.notices,
   };
 }
 
@@ -238,10 +291,18 @@ async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<
       return null;
     case "plugin:dialog|open":
       return null;
+    case "plugin:opener|open_url":
+      window.open(String(args.url), "_blank", "noopener");
+      return null;
+    case "plugin:app|version":
+      return "0.1.0";
     case "bootstrap":
       return bootstrap();
     case "library":
-      return structuredClone(tracks);
+      return orderedLibrary();
+    case "set_library_order":
+      libraryOrder = (args.keys as string[]) ?? [];
+      return null;
     case "search": {
       const query = String(args.query).toLowerCase();
       const lyricLine = lrc
@@ -320,6 +381,7 @@ async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (args.key === "theme") state.theme = String(args.value);
       else if (args.key === "language") state.language = String(args.value);
       else settings[String(args.key)] = args.value;
+      if (args.key === "positionSyncDevice") previewPlayback(String(args.value ?? ""));
       return null;
     case "set_exposure": {
       const playlist = playlists.find((item) => item.id === args.id);
@@ -334,6 +396,19 @@ async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "network_command": {
       const action = String(args.action);
       if (action === "confirm" || action === "reject") state.offer = null;
+      if (action === "notice" || action === "clear-notices") {
+        const payload = (args.payload ?? {}) as { action?: string; id?: number; ids?: number[] };
+        const op = action === "clear-notices" ? "clear-all" : payload.action;
+        if (op === "read") state.notices = state.notices?.map((item) => (item.id === payload.id ? { ...item, read: true } : item));
+        if (op === "read-ids") state.notices = state.notices?.map((item) => (payload.ids?.includes(item.id) ? { ...item, read: true } : item));
+        if (op === "read-all") state.notices = state.notices?.map((item) => ({ ...item, read: true }));
+        if (op === "unread") state.notices = state.notices?.map((item) => (item.id === payload.id ? { ...item, read: false } : item));
+        if (op === "pin") state.notices = state.notices?.map((item) => (item.id === payload.id ? { ...item, pinned: true } : item));
+        if (op === "unpin") state.notices = state.notices?.map((item) => (item.id === payload.id ? { ...item, pinned: false } : item));
+        if (op === "delete") state.notices = state.notices?.filter((item) => item.id !== payload.id);
+        if (op === "clear-unpinned") state.notices = state.notices?.filter((item) => item.pinned);
+        if (op === "clear-all") state.notices = [];
+      }
       if (action === "resolve") state.pending = state.pending.filter((item) => item.feature !== (args.payload as { feature: string }).feature);
       if (action === "paste") state.manual = String(args.payload).startsWith("DMP1:") ? null : "badText";
       if (action === "manual") {
@@ -364,9 +439,15 @@ async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<
     case "playback_result":
     case "remote_failure":
     case "expose_members":
-    case "update_config":
     case "move_membership":
     case "show_in_folder":
+    case "quit_app":
+    case "hide_to_tray":
+    case "set_tray_menu":
+      return null;
+    case "plugin:window|close":
+      // The real shell intercepts the close request and asks the page what to do.
+      emit("close-requested");
       return null;
     default:
       console.warn("mock: unhandled", cmd, args);

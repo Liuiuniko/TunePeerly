@@ -22,6 +22,8 @@ pub enum Frame {
     AudioErr { id: u64, reason: String },
     AudioCancel { id: u64 },
     AudioHead { id: u64, total: u64 },
+    /// The side that was asked to pair has accepted. Empty payload.
+    PairAccept,
 }
 
 impl Frame {
@@ -57,6 +59,7 @@ impl Frame {
                 payload.extend_from_slice(&total.to_be_bytes());
                 (8, payload)
             }
+            Self::PairAccept => (9, Vec::new()),
         };
         if payload.len() > MAX_PAYLOAD {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
@@ -126,6 +129,7 @@ impl Frame {
                 id: u64::from_be_bytes(payload[0..8].try_into().unwrap()),
                 total: u64::from_be_bytes(payload[8..16].try_into().unwrap()),
             }),
+            9 => Ok(Self::PairAccept),
             _ => Err(io::Error::new(io::ErrorKind::InvalidData, "unknown frame")),
         }
     }

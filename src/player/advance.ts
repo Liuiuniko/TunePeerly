@@ -61,10 +61,15 @@ export function playFromList(
   };
 }
 
-export function startLibraryRandom(tracks: TrackRef[], random: () => number, contextId: string): QueueState {
+export function startShuffled(
+  tracks: TrackRef[],
+  random: () => number,
+  contextId: string,
+  order: "listShuffle" | "libraryRandom",
+): QueueState {
   const shuffled = fisherYates(tracks, random);
   return {
-    order: "libraryRandom",
+    order,
     repeat: "off",
     contextId,
     past: [],
@@ -72,6 +77,10 @@ export function startLibraryRandom(tracks: TrackRef[], random: () => number, con
     future: shuffled.slice(1),
     positionSec: 0,
   };
+}
+
+export function startLibraryRandom(tracks: TrackRef[], random: () => number, contextId: string): QueueState {
+  return startShuffled(tracks, random, contextId, "libraryRandom");
 }
 
 export function onEnded(
@@ -96,7 +105,9 @@ export function onEnded(
     };
   }
   if (state.repeat === "list") {
-    const pool = state.order === "manual" ? rebuild : fisherYates(rebuild, random);
+    const source = rebuild.length > 0 ? rebuild : playedOrder(state);
+    if (source.length === 0) return { state, increment: false };
+    const pool = state.order === "manual" ? source : fisherYates(source, random);
     const [current, ...future] = pool;
     return {
       increment: Boolean(current),
@@ -112,19 +123,57 @@ export function onEnded(
   return { state, increment: false };
 }
 
-export function previous(state: QueueState, positionSec: number): QueueState {
+/** The song finished and nothing is queued. Keep playing from the whole library. */
+export function continueLibrary(state: QueueState, library: TrackRef[], random: () => number): QueueState {
+  const others = library.filter((track) => !sameTrack(track, state.current));
+  if (library.length === 0) return { ...state, positionSec: 0 };
+  const past = state.current ? [...state.past, state.current] : state.past;
+  if (state.order === "manual") {
+    const index = library.findIndex((track) => sameTrack(track, state.current));
+    const after = index >= 0 ? library.slice(index + 1) : others;
+    const before = index >= 0 ? library.slice(0, index).filter((track) => !sameTrack(track, state.current)) : [];
+    const sequence = [...after, ...before];
+    const list = sequence.length > 0 ? sequence : library;
+    const [current, ...future] = list;
+    return { ...state, contextId: "library", past, current: current ?? null, future, positionSec: 0 };
+  }
+  const source = others.length > 0 ? others : library;
+  const [current, ...future] = fisherYates(source, random);
+  return {
+    ...state,
+    contextId: state.order === "libraryRandom" ? "random" : "library",
+    past,
+    current: current ?? null,
+    future,
+    positionSec: 0,
+  };
+}
+
+export function previous(state: QueueState, positionSec: number, playlist: TrackRef[] = []): QueueState {
   if (positionSec > 3) {
     return { ...state, positionSec: 0 };
   }
   const prior = state.past[state.past.length - 1];
-  if (!prior) return { ...state, positionSec: 0 };
-  return {
-    ...state,
-    past: state.past.slice(0, -1),
-    current: prior,
-    future: state.current ? [state.current, ...state.future] : state.future,
-    positionSec: 0,
-  };
+  if (prior) {
+    return {
+      ...state,
+      past: state.past.slice(0, -1),
+      current: prior,
+      future: state.current ? [state.current, ...state.future] : state.future,
+      positionSec: 0,
+    };
+  }
+  const last = playlist[playlist.length - 1];
+  if (last && !sameTrack(last, state.current)) {
+    return {
+      ...state,
+      past: [],
+      current: last,
+      future: playlist.filter((track) => !sameTrack(track, last)),
+      positionSec: 0,
+    };
+  }
+  return { ...state, positionSec: 0 };
 }
 
 export function next(state: QueueState): QueueState {
@@ -137,6 +186,16 @@ export function next(state: QueueState): QueueState {
     future,
     positionSec: 0,
   };
+}
+
+/** Next plays the queue. With nothing left, it restarts at the first song of the current list. */
+export function nextOrWrap(state: QueueState, playlist: TrackRef[], random: () => number): QueueState {
+  if (state.future.length > 0) return next(state);
+  if (playlist.length === 0) return state.current ? { ...state, positionSec: 0 } : state;
+  const [current, ...rest] = playlist;
+  const future = state.order === "manual" ? rest : fisherYates(rest, random);
+  const past = state.current && !sameTrack(state.current, current) ? [...state.past, state.current] : state.past;
+  return { ...state, past, current, future, positionSec: 0 };
 }
 
 export function playNext(state: QueueState, tracks: TrackRef | TrackRef[]): QueueState {
@@ -176,9 +235,34 @@ export function jumpTo(state: QueueState, index: number): QueueState {
   };
 }
 
+function playedOrder(state: QueueState): TrackRef[] {
+  const seen = new Set<string>();
+  const items: TrackRef[] = [];
+  for (const item of [...state.past, ...(state.current ? [state.current] : [])]) {
+    if (seen.has(item.key)) continue;
+    seen.add(item.key);
+    items.push(item);
+  }
+  return items;
+}
+
+/** Keeps the current song and lines up the songs after it in the list. */
+export function followListOrder(state: QueueState, playlist: TrackRef[]): QueueState {
+  if (!state.current || state.order !== "manual") return state;
+  const index = playlist.findIndex((track) => sameTrack(track, state.current));
+  if (index < 0) return state;
+  return { ...state, future: playlist.slice(index + 1) };
+}
+
 export function toggleShuffle(state: QueueState, context: TrackRef[], random: () => number): QueueState {
   if (state.order === "manual") {
-    return { ...state, order: "listShuffle", future: fisherYates(state.future, random) };
+    const rest = state.current ? context.filter((track) => !sameTrack(track, state.current)) : context;
+    const shuffled = fisherYates(rest, random);
+    if (!state.current) {
+      const [current, ...future] = shuffled;
+      return { ...state, order: "listShuffle", past: [], current: current ?? null, future, positionSec: 0 };
+    }
+    return { ...state, order: "listShuffle", future: shuffled };
   }
   const index = context.findIndex((track) => sameTrack(track, state.current));
   const future = index >= 0 ? context.slice(index + 1) : context;

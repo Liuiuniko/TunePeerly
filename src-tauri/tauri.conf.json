@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Multi-Device Music Player",
-  "version": "0.1.0",
+  "productName": "TunePeerly",
+  "mainBinaryName": "TunePeerly",
+  "version": "0.6.0",
   "identifier": "app.devicemusic",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,11 +13,14 @@
   "app": {
     "windows": [
       {
-        "title": "Multi-Device Music Player",
+        "label": "main",
+        "title": "TunePeerly",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
-        "minHeight": 640
+        "minHeight": 640,
+        "decorations": false,
+        "shadow": true
       }
     ],
     "security": {

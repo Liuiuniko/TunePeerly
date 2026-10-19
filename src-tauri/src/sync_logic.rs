@@ -1,58 +1,11 @@
-//! Snapshot, queue, and history rules. These functions do not read the network.
+//! Snapshot and history rules. These functions do not read the network.
 
 use chrono::{DateTime, Duration, Utc};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum QueueItem {
-    Content(String),
-    Local(String),
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
     pub content_id: String,
     pub at: DateTime<Utc>,
-}
-
-pub fn apply_queue_snapshot(
-    future: &[QueueItem],
-    current_content: Option<&str>,
-    snapshot: &[String],
-) -> Vec<QueueItem> {
-    let sequence: Vec<&str> = match current_content {
-        Some(current) => match snapshot.iter().position(|id| id == current) {
-            Some(index) => snapshot[index + 1..].iter().map(String::as_str).collect(),
-            None => snapshot.iter().map(String::as_str).collect(),
-        },
-        None => snapshot.iter().map(String::as_str).collect(),
-    };
-
-    let mut result = Vec::new();
-    let mut next = 0usize;
-    let mut last_content_at: Option<usize> = None;
-    for item in future {
-        match item {
-            QueueItem::Local(id) => result.push(QueueItem::Local(id.clone())),
-            QueueItem::Content(_) => {
-                if next < sequence.len() {
-                    result.push(QueueItem::Content(sequence[next].to_string()));
-                    last_content_at = Some(result.len() - 1);
-                    next += 1;
-                }
-            }
-        }
-    }
-    if next < sequence.len() {
-        let extras: Vec<QueueItem> = sequence[next..]
-            .iter()
-            .map(|id| QueueItem::Content((*id).to_string()))
-            .collect();
-        let insert_at = last_content_at.map(|index| index + 1).unwrap_or(result.len());
-        result.splice(insert_at..insert_at, extras);
-    }
-    result
 }
 
 pub fn apply_member_snapshot(existing: &[MemberRef], snapshot: &[String]) -> Vec<MemberRef> {
@@ -114,6 +67,8 @@ fn clamp_future(at: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
+    /// Playback tests build a local candidate. The running player does not.
+    #[cfg_attr(not(test), allow(dead_code))]
     Local,
     Remote,
 }
@@ -130,6 +85,15 @@ pub enum FailureClass {
     Transport,
     Decode,
     Unsupported,
+}
+
+/// Decode and unsupported stop the whole `content_id`. Anything else can try another holder.
+pub fn failure_class(reason: &str) -> FailureClass {
+    match reason {
+        "playback.decodeFailed" => FailureClass::Decode,
+        "playback.unsupported" | "playback.video" => FailureClass::Unsupported,
+        _ => FailureClass::Transport,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,58 +149,9 @@ pub fn select_source(
     }
 }
 
-pub fn should_apply_revision(applied: i64, incoming: i64) -> bool {
-    incoming > applied
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn content(id: &str) -> QueueItem {
-        QueueItem::Content(id.to_string())
-    }
-    fn local(id: &str) -> QueueItem {
-        QueueItem::Local(id.to_string())
-    }
-
-    #[test]
-    fn queue_replaces_content_ids_and_keeps_local_order() {
-        let future = vec![local("l1"), content("c1"), local("l2"), content("c2"), local("l3")];
-        let snapshot = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let next = apply_queue_snapshot(&future, None, &snapshot);
-        assert_eq!(
-            next,
-            vec![
-                local("l1"),
-                content("a"),
-                local("l2"),
-                content("b"),
-                content("c"),
-                local("l3")
-            ]
-        );
-    }
-
-    #[test]
-    fn queue_drops_extra_content_slots() {
-        let future = vec![content("c1"), local("l1"), content("c2")];
-        let snapshot = vec!["a".to_string()];
-        assert_eq!(
-            apply_queue_snapshot(&future, None, &snapshot),
-            vec![content("a"), local("l1")]
-        );
-    }
-
-    #[test]
-    fn queue_uses_items_after_the_current_song() {
-        let future = vec![content("old")];
-        let snapshot = vec!["current".to_string(), "next".to_string()];
-        assert_eq!(
-            apply_queue_snapshot(&future, Some("current"), &snapshot),
-            vec![content("next")]
-        );
-    }
 
     #[test]
     fn member_snapshot_keeps_unhashed_rows() {
@@ -284,10 +199,24 @@ mod tests {
     }
 
     #[test]
-    fn offline_edits_do_not_let_an_older_revision_win() {
-        assert!(!should_apply_revision(4, 4));
-        assert!(!should_apply_revision(5, 4));
-        assert!(should_apply_revision(4, 5));
+    fn equal_history_timestamps_keep_one_order_without_error() {
+        let now = DateTime::parse_from_rfc3339("2026-10-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let same = now - Duration::minutes(5);
+        let merged = merge_history(
+            vec![
+                HistoryEntry { content_id: "b".into(), at: same },
+                HistoryEntry { content_id: "a".into(), at: same },
+            ],
+            vec![HistoryEntry { content_id: "a".into(), at: same }],
+            now,
+            100,
+        );
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].content_id, "a");
+        assert_eq!(merged[1].content_id, "b");
+        assert_eq!(merged[0].at, same);
     }
 
     #[test]

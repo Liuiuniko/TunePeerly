@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactN
 import { useTranslation } from "react-i18next";
 import { api, type Track } from "../api";
 import { useApp, type Route } from "../app/model";
-import { Collage, Cover, LikedCover } from "../components/Cover";
+import { Cover, LikedCover } from "../components/Cover";
 import { Select } from "../components/controls";
 import { ActionBar, PageHeader } from "../components/PageHeader";
+import { SyncButton } from "../components/SyncButton";
 import { TrackTable, type Columns } from "../components/TrackTable";
 import { tintFor, totalText } from "../lib/format";
 import { covers, filterText, folderName, sortTracks, type Sort } from "../lib/library";
@@ -22,6 +23,7 @@ type PageInfo = {
   defaultSort: Sort;
   columns?: Columns;
   playlistId?: string;
+  reorderId?: string;
   empty: ReactNode;
   extraMeta?: ReactNode;
   shuffleAll?: boolean;
@@ -50,10 +52,12 @@ export function TrackListPage({ route }: { route: Route }) {
     setSortState(value);
   };
 
+  const sortChoices = sortOptions(info.defaultSort, t, route.name === "recent");
   const shown = useMemo(() => sortTracks(filterText(info.tracks, filter), sort), [info.tracks, filter, sort]);
   const total = info.tracks.reduce((sum, track) => sum + (track.durationMs ?? 0), 0);
   const playlist = info.playlistId ? app.boot?.playlists.find((item) => item.id === info.playlistId) : undefined;
-  const reorderable = Boolean(info.playlistId) && sort.key === "order" && sort.dir === 1 && !filter;
+  const reorderId = info.reorderId ?? info.playlistId;
+  const reorderable = Boolean(reorderId) && sort.key === "order" && sort.dir === 1 && !filter;
 
   return (
     <div className="page list-page">
@@ -88,16 +92,21 @@ export function TrackListPage({ route }: { route: Route }) {
         </button>
         {route.name === "library" && (
           <>
-            <button type="button" className="btn ghost" onClick={() => void app.addMusic("directory")}>
-              <Icons.folder /> {t("library.addFolder")}
+            <button type="button" className="btn ghost" title={t("library.addFolder")} aria-label={t("library.addFolder")} onClick={() => void app.addMusic("directory")}>
+              <Icons.folder /> <span className="btn-label">{t("library.addFolder")}</span>
             </button>
-            <button type="button" className="btn ghost" onClick={() => void app.addMusic("file")}>
-              <Icons.music /> {t("library.addFiles")}
+            <button type="button" className="btn ghost" title={t("library.addFiles")} aria-label={t("library.addFiles")} onClick={() => void app.addMusic("file")}>
+              <Icons.music /> <span className="btn-label">{t("library.addFiles")}</span>
+            </button>
+            <button type="button" className={`icon-btn lg${sharingOpen ? " on" : ""}`} aria-label={t("playlist.sharing")} title={t("playlist.sharing")} aria-pressed={sharingOpen} onClick={() => setSharingOpen((value) => !value)}>
+              <Icons.eye />
             </button>
           </>
         )}
+        {route.name === "liked" && <SyncButton feature="favorites" />}
         {playlist && (
           <>
+            <SyncButton feature="playlists" playlists />
             <button type="button" className={`icon-btn lg${sharingOpen ? " on" : ""}`} aria-label={t("playlist.sharing")} title={t("playlist.sharing")} onClick={() => setSharingOpen((value) => !value)}>
               {playlist.exposure === "hide" ? <Icons.eyeOff /> : <Icons.eye />}
             </button>
@@ -142,15 +151,25 @@ export function TrackListPage({ route }: { route: Route }) {
         </div>
         <Select
           label={t("list.sortBy")}
-          value={`${sort.key}:${sort.dir}`}
+          value={sortChoices.find((option) => option.value.startsWith(`${sort.key}:`))?.value ?? sortChoices[0].value}
           onChange={(value) => {
             const [key, dir] = value.split(":");
             setSort({ key: key as Sort["key"], dir: Number(dir) === -1 ? -1 : 1 });
           }}
-          options={sortOptions(info.defaultSort, t, route.name === "recent")}
+          options={sortChoices}
         />
+        <button
+          type="button"
+          className="icon-btn sort-dir"
+          aria-label={sort.dir === 1 ? t("list.sortAsc") : t("list.sortDesc")}
+          title={sort.dir === 1 ? t("list.sortAsc") : t("list.sortDesc")}
+          onClick={() => setSort({ key: sort.key, dir: sort.dir === 1 ? -1 : 1 })}
+        >
+          <Icons.chevronDown className={sort.dir === 1 ? "up" : ""} />
+        </button>
       </ActionBar>
       {playlist && sharingOpen && <SharingPanel playlistId={playlist.id} exposure={playlist.exposure} />}
+      {route.name === "library" && sharingOpen && <LibrarySharingPanel />}
       <TrackTable
         tracks={shown}
         contextId={info.contextId}
@@ -158,6 +177,7 @@ export function TrackListPage({ route }: { route: Route }) {
         onSort={setSort}
         defaultSort={info.defaultSort}
         playlistId={info.playlistId}
+        reorderId={reorderId}
         reorderable={reorderable}
         columns={info.columns}
         empty={filter ? t("list.noMatch", { text: filter }) : info.empty}
@@ -186,6 +206,7 @@ function sortOptions(defaultSort: Sort, t: (key: string) => string, history: boo
     { value: "folder:1", label: t("sort.folder") },
     { value: "addedAt:-1", label: t("sort.added") },
     { value: "favorite:-1", label: t("sort.liked") },
+    { value: "duration:-1", label: t("sort.duration") },
   ];
   if (defaultSort.key === "order") options.unshift({ value: "order:1", label: history ? t("sort.recent") : t("sort.custom") });
   if (defaultSort.key === "trackNumber") options.unshift({ value: "trackNumber:1", label: t("sort.trackNumber") });
@@ -207,19 +228,62 @@ function SharingPanel({ playlistId, exposure }: { playlistId: string; exposure: 
           value={exposure}
           onChange={(value) => void api.setExposure("playlist", playlistId, value).then(app.scheduleRefresh).catch(app.say)}
           options={[
-            { value: "follow", label: t("exposure.follow") },
-            { value: "expose", label: t("exposure.expose") },
-            { value: "hide", label: t("exposure.hide") },
+            { value: "follow", label: t("exposure.follow"), hint: t("exposure.followHint") },
+            { value: "expose", label: t("exposure.expose"), hint: t("exposure.exposeHint") },
+            { value: "hide", label: t("exposure.hide"), hint: t("exposure.hideHint") },
           ]}
         />
       </div>
       <div className="sharing-row">
         <div className="setting-help">{t("settings.exposeNowHelp")}</div>
         <div className="button-row">
-          <button type="button" className="btn soft" onClick={() => void api.exposeMembers("playlist", playlistId, true).then(() => { app.toast(t("toast.exposed")); app.scheduleRefresh(); }).catch(app.say)}>
+          <button type="button" className="btn soft" title={t("exposure.exposeAllHint")} onClick={() => void api.exposeMembers("playlist", playlistId, true).then(() => { app.toast(t("toast.exposed")); app.scheduleRefresh(); }).catch(app.say)}>
             <Icons.eye /> {t("exposure.exposeAll")}
           </button>
-          <button type="button" className="btn soft" onClick={() => void api.exposeMembers("playlist", playlistId, false).then(() => { app.toast(t("toast.hidden")); app.scheduleRefresh(); }).catch(app.say)}>
+          <button type="button" className="btn soft" title={t("exposure.hideAllHint")} onClick={() => void api.exposeMembers("playlist", playlistId, false).then(() => { app.toast(t("toast.hidden")); app.scheduleRefresh(); }).catch(app.say)}>
+            <Icons.eyeOff /> {t("exposure.hideAll")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LibrarySharingPanel() {
+  const { t } = useTranslation();
+  const app = useApp();
+  const run = (expose: boolean) =>
+    void api
+      .exposeMembers("library", "", expose)
+      .then(() => {
+        app.toast(t(expose ? "toast.exposed" : "toast.hidden"));
+        app.scheduleRefresh();
+      })
+      .catch(app.say);
+  return (
+    <div className="sharing-panel">
+      <div className="sharing-row">
+        <div>
+          <div className="setting-title">{t("settings.exposeDefault")}</div>
+          <div className="setting-help">{t("settings.exposeDefaultHelp")}</div>
+        </div>
+        <Select
+          label={t("settings.exposeDefault")}
+          value={app.settings.exposeDefault === "expose" ? "expose" : "hide"}
+          onChange={(value) => void app.setSetting("exposeDefault", value)}
+          options={[
+            { value: "hide", label: t("exposure.hideDefault"), hint: t("exposure.hideDefaultHint") },
+            { value: "expose", label: t("exposure.exposeDefault"), hint: t("exposure.exposeDefaultHint") },
+          ]}
+        />
+      </div>
+      <div className="sharing-row">
+        <div className="setting-help">{t("settings.exposeNowHelp")}</div>
+        <div className="button-row">
+          <button type="button" className="btn soft" title={t("exposure.exposeAllHint")} onClick={() => run(true)}>
+            <Icons.eye /> {t("exposure.exposeAll")}
+          </button>
+          <button type="button" className="btn soft" title={t("exposure.hideAllHint")} onClick={() => run(false)}>
             <Icons.eyeOff /> {t("exposure.hideAll")}
           </button>
         </div>
@@ -240,7 +304,7 @@ function usePageInfo(route: Route): PageInfo {
           ...base,
           kind: t("kind.playlist"),
           title: t("nav.liked"),
-          cover: <LikedCover />,
+          cover: covers(app.liked, 1, "liked")[0] ? <Cover src={covers(app.liked, 1, "liked")[0]} /> : <LikedCover />,
           tracks: app.liked,
           contextId: "liked",
           defaultSort: { key: "addedAt", dir: -1 },
@@ -251,7 +315,7 @@ function usePageInfo(route: Route): PageInfo {
           ...base,
           kind: t("kind.history"),
           title: t("nav.recent"),
-          cover: <Collage covers={covers(app.recent)} />,
+          cover: covers(app.recent, 1, "recent")[0] ? <Cover src={covers(app.recent, 1, "recent")[0]} /> : <Cover />,
           tracks: app.recent,
           contextId: "recent",
           defaultSort: { key: "order", dir: 1 },
@@ -264,7 +328,7 @@ function usePageInfo(route: Route): PageInfo {
           ...base,
           kind: t("kind.playlist"),
           title: playlist?.name ?? "",
-          cover: <Collage covers={covers(tracks)} />,
+          cover: <Cover src={covers(tracks, 1, `playlist:${id}`)[0]} />,
           tracks,
           contextId: `playlist:${id}`,
           playlistId: id,
@@ -299,11 +363,12 @@ function usePageInfo(route: Route): PageInfo {
       case "device": {
         const link = app.boot?.links.find((item) => item.deviceId === id);
         const tracks = app.tracks.filter((track) => track.holderIds.includes(id));
+        const art = covers(tracks, 1, `device:${id}`)[0];
         return {
           ...base,
           kind: t("kind.device"),
           title: link?.name || id.slice(0, 8),
-          cover: <Cover icon="device" />,
+          cover: art ? <Cover src={art} /> : <Cover icon="device" />,
           tracks,
           contextId: `device:${id}`,
           columns: { folder: false, added: false },
@@ -316,9 +381,11 @@ function usePageInfo(route: Route): PageInfo {
           ...base,
           kind: t("kind.library"),
           title: t("nav.allMusic"),
-          cover: <Collage covers={covers(app.library)} />,
+          cover: covers(app.library, 1, "library")[0] ? <Cover src={covers(app.library, 1, "library")[0]} /> : <Cover />,
           tracks: app.library,
           contextId: "library",
+          reorderId: "library",
+          defaultSort: { key: "order", dir: 1 },
           shuffleAll: true,
           empty: <EmptyHint icon={<Icons.folder />} title={t("empty.libraryTitle")} body={t("empty.libraryBody")} />,
         };

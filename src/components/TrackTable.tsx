@@ -32,12 +32,13 @@ type Props = {
   onSort?: (sort: Sort) => void;
   defaultSort?: Sort;
   playlistId?: string;
+  reorderId?: string;
   reorderable?: boolean;
   columns?: Columns;
   empty?: ReactNode;
 };
 
-export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playlistId, reorderable, columns = {}, empty }: Props) {
+export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playlistId, reorderId, reorderable, columns = {}, empty }: Props) {
   const { t } = useTranslation();
   const app = useApp();
   const scroller = useScrollRoot();
@@ -104,15 +105,12 @@ export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playl
   const header = (key: SortKey, label: ReactNode, className = "") => {
     if (!onSort || !sort) return <span className={`th ${className}`}>{label}</span>;
     const active = sort.key === key;
-    const nextSort = (): Sort => {
-      if (!active) return { key, dir: key === "addedAt" || key === "favorite" ? -1 : 1 };
-      if (sort.dir === (key === "addedAt" || key === "favorite" ? -1 : 1)) return { key, dir: sort.dir === 1 ? -1 : 1 };
-      return defaultSort ?? { key: "title", dir: 1 };
-    };
+    const preferred = key === "addedAt" || key === "favorite" || key === "duration" ? -1 : 1;
+    const nextSort = (): Sort => (active ? { key, dir: sort.dir === 1 ? -1 : 1 } : { key, dir: preferred });
     return (
-      <button type="button" className={`th sortable${active ? " active" : ""} ${className}`} onClick={() => onSort(nextSort())}>
+      <button type="button" className={`th sortable${active ? " active" : ""} ${className}`} title={t("list.sortColumn")} aria-label={typeof label === "string" ? undefined : t("list.sortColumn")} onClick={() => onSort(nextSort())}>
         <span>{label}</span>
-        {active && <Icons.chevronDown className={sort.dir === 1 ? "up" : ""} />}
+        <Icons.chevronDown className={`sort-mark${active && sort.dir === 1 ? " up" : ""}`} />
       </button>
     );
   };
@@ -127,8 +125,9 @@ export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playl
     }}>
       <div className={`track-head ${gridClass}`} role="row">
         {sort && onSort && cols.number === "index" ? (
-          <button type="button" className={`th num sortable${sort.key === (defaultSort?.key ?? "order") ? " active" : ""}`} onClick={() => onSort(defaultSort ?? { key: "order", dir: 1 })}>
-            #
+          <button type="button" className={`th num sortable${sort.key === (defaultSort?.key ?? "order") ? " active" : ""}`} title={t("list.sortColumn")} onClick={() => onSort(defaultSort ?? { key: "order", dir: 1 })}>
+            <span>#</span>
+            <Icons.chevronDown className={`sort-mark${sort.key === (defaultSort?.key ?? "order") && sort.dir === 1 ? " up" : ""}`} />
           </button>
         ) : (
           <span className="th num">#</span>
@@ -139,7 +138,7 @@ export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playl
         {cols.folder && header("folder", t("list.folder"), "c-folder")}
         {cols.added && header("addedAt", t("list.added"), "c-added")}
         {header("favorite", <Icons.heart />, "c-like")}
-        <span className="th c-time" title={t("list.time")}><Icons.clock /></span>
+        {header("duration", <Icons.clock />, "c-time")}
         <span className="th c-more" />
       </div>
       <div ref={body} className="track-body" style={{ height: tracks.length * ROW }}>
@@ -157,7 +156,7 @@ export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playl
               cols={cols}
               current={key === currentKey}
               selected={selected.has(key)}
-              dropId={reorderable && playlistId ? `member:${playlistId}:${index}` : undefined}
+              dropId={reorderable && reorderId ? `member:${reorderId}:${index}` : undefined}
               onSelect={select}
               onPlay={(at) => {
                 if (key === currentKey && at === index && app.current) app.toggle();
@@ -174,8 +173,8 @@ export function TrackTable({ tracks, contextId, sort, onSort, defaultSort, playl
                   event,
                   (): DragSource => {
                     const items = chosen(at);
-                    return reorderable && playlistId && items.length === 1
-                      ? { type: "member", playlistId, index: at, tracks: items }
+                    return reorderable && reorderId && items.length === 1
+                      ? { type: "member", playlistId: reorderId, index: at, tracks: items }
                       : { type: "tracks", tracks: items };
                   },
                   () => {
@@ -225,10 +224,12 @@ const TrackRow = memo(function TrackRow({ track, index, top, number, gridClass, 
       onClick={(event) => {
         if (!clickWasDrag()) onSelect(index, event);
       }}
-      onDoubleClick={() => onPlay(index)}
+      onDoubleClick={(event) => {
+        if (!(event.target as HTMLElement).closest("button, input, a, select, textarea")) onPlay(index);
+      }}
       onContextMenu={(event) => onMenu(event, index)}
       onKeyDown={(event) => {
-        if (event.key === "Enter") onPlay(index);
+        if (event.key === "Enter" && !(event.target as HTMLElement).closest("button, input, a, select, textarea")) onPlay(index);
       }}
     >
       <div className="cell num">
@@ -267,6 +268,12 @@ const TrackRow = memo(function TrackRow({ track, index, top, number, gridClass, 
       {cols.source && (
         <div className="cell c-source">
           <span className={`badge ${track.badge}`}>{t(`badge.${track.badge}`)}</span>
+          {track.localFileId && (
+            <span className={`badge expose${track.exposed ? " on" : ""}`} title={track.exposed ? t("list.exposedHelp") : t("list.hiddenHelp")}>
+              {track.exposed ? <Icons.eye /> : <Icons.eyeOff />}
+              {track.exposed ? t("list.exposed") : t("list.hidden")}
+            </span>
+          )}
         </div>
       )}
       {cols.album && (

@@ -109,11 +109,17 @@ impl AudioBus {
     }
 }
 
-pub async fn serve(bus: Arc<AudioBus>, pulls: mpsc::UnboundedSender<Pull>) {
+/// Starts the loopback media proxy and signals once route URLs are usable.
+pub async fn serve(
+    bus: Arc<AudioBus>,
+    pulls: mpsc::UnboundedSender<Pull>,
+    ready: std::sync::mpsc::SyncSender<()>,
+) {
     let Ok(listener) = TcpListener::bind("127.0.0.1:0").await else { return };
     if let Ok(addr) = listener.local_addr() {
         *bus.base.lock().expect("base") = format!("http://127.0.0.1:{}", addr.port());
     }
+    let _ = ready.send(());
     loop {
         let Ok((socket, _)) = listener.accept().await else { continue };
         let bus = bus.clone();
@@ -125,7 +131,15 @@ pub async fn serve(bus: Arc<AudioBus>, pulls: mpsc::UnboundedSender<Pull>) {
 }
 
 async fn handle(mut socket: TcpStream, bus: Arc<AudioBus>, pulls: mpsc::UnboundedSender<Pull>) -> std::io::Result<()> {
-    let header = read_header(&mut socket).await?;
+    // A local process can connect without ever finishing its HTTP headers.  Do
+    // not leave one task alive indefinitely for each such connection.
+    let header = match tokio::time::timeout(Duration::from_secs(10), read_header(&mut socket)).await {
+        Ok(Ok(header)) => header,
+        _ => {
+            socket.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n").await?;
+            return Ok(());
+        }
+    };
     let Some(request) = parse_request(&header) else {
         socket.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n").await?;
         return Ok(());
@@ -139,23 +153,27 @@ async fn handle(mut socket: TcpStream, bus: Arc<AudioBus>, pulls: mpsc::Unbounde
     let id = rand::random::<u64>();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let device_id = route.device_id.clone();
-    let _ = pulls.send(Pull::Open {
+    let cancel = |pulls: &mpsc::UnboundedSender<Pull>| {
+        let _ = pulls.send(Pull::Cancel { id, device_id: device_id.clone() });
+    };
+    if pulls.send(Pull::Open {
         id,
         device_id: route.device_id,
         content_id: route.content_id,
         start,
         end,
         reply: tx,
-    });
-    let cancel = |pulls: &mpsc::UnboundedSender<Pull>| {
-        let _ = pulls.send(Pull::Cancel { id, device_id: device_id.clone() });
-    };
+    }).is_err() {
+        socket.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n").await?;
+        return Ok(());
+    }
 
     let first = tokio::time::timeout(Duration::from_secs(15), rx.recv()).await;
     let total = match first {
         Ok(Some(piece)) if piece.error.is_none() && piece.total.is_some() => piece.total.unwrap_or(0),
         Ok(Some(piece)) if piece.error.as_deref() == Some("range") => {
             bus.finish(id);
+            cancel(&pulls);
             socket.write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nConnection: close\r\n\r\n").await?;
             return Ok(());
         }
@@ -166,7 +184,17 @@ async fn handle(mut socket: TcpStream, bus: Arc<AudioBus>, pulls: mpsc::Unbounde
             return Ok(());
         }
     };
-    let stop = end.unwrap_or(total).min(total);
+    let stop = if request.range.is_some() {
+        let Some(stop) = range_stop(start, end, total) else {
+            bus.finish(id);
+            cancel(&pulls);
+            socket.write_all(b"HTTP/1.1 416 Range Not Satisfiable\r\nConnection: close\r\n\r\n").await?;
+            return Ok(());
+        };
+        stop
+    } else {
+        total
+    };
     let length = stop.saturating_sub(start);
     let head = if request.range.is_some() {
         format!(
@@ -225,6 +253,9 @@ async fn read_header(socket: &mut TcpStream) -> std::io::Result<Vec<u8>> {
         }
         buf.extend_from_slice(&tmp[..n]);
     }
+    if !buf.windows(4).any(|window| window == b"\r\n\r\n") {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "incomplete HTTP header"));
+    }
     Ok(buf)
 }
 
@@ -243,6 +274,10 @@ fn parse_request(bytes: &[u8]) -> Option<Request> {
         return None;
     }
     let token = request.next()?.trim_start_matches('/').split('?').next()?.to_string();
+    let version = request.next()?;
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") || request.next().is_some() || token.is_empty() || token.contains('/') {
+        return None;
+    }
     let mut range = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else { continue };
@@ -261,6 +296,14 @@ fn parse_range(value: &str) -> Option<(u64, Option<u64>)> {
     Some((start, end))
 }
 
+/// Resolves an inclusive HTTP byte range (stored internally with an exclusive
+/// end) against a known object length.  A `Range` request may not describe an
+/// empty response: those must use HTTP 416 rather than a malformed 206 header.
+fn range_stop(start: u64, end: Option<u64>, total: u64) -> Option<u64> {
+    let stop = end.unwrap_or(total).min(total);
+    (start < total && stop > start).then_some(stop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,11 +316,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unsatisfiable_or_empty_ranges() {
+        assert_eq!(range_stop(10, Some(10), 20), None);
+        assert_eq!(range_stop(10, Some(9), 20), None);
+        assert_eq!(range_stop(20, None, 20), None);
+        assert_eq!(range_stop(0, None, 0), None);
+        assert_eq!(range_stop(10, Some(99), 20), Some(20));
+    }
+
+    #[test]
     fn parses_request_token_and_method() {
         let request = parse_request(b"HEAD /abc?x=1 HTTP/1.1\r\nRange: bytes=5-\r\n\r\n").expect("request");
         assert_eq!(request.token, "abc");
         assert_eq!(request.range, Some((5, None)));
         assert!(request.head_only);
         assert!(parse_request(b"POST /abc HTTP/1.1\r\n\r\n").is_none());
+        assert!(parse_request(b"GET /abc\r\n\r\n").is_none());
     }
 }

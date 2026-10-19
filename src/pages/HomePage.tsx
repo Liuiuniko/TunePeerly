@@ -2,7 +2,8 @@ import { useSyncExternalStore, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useApp } from "../app/model";
 import { Card, Shelf } from "../components/Card";
-import { Collage, Cover, LikedCover } from "../components/Cover";
+import { Cover, LikedCover } from "../components/Cover";
+import { SyncButton } from "../components/SyncButton";
 import { Mascot } from "../components/Mascot";
 import { clockText, greetingKey } from "../lib/format";
 import { covers, displayTitle, trackKey } from "../lib/library";
@@ -23,14 +24,14 @@ export function HomePage() {
     <div className="page home-page">
       <h1 className="greeting">{t(greetingKey())}</h1>
       <div className="quick-grid">
-        <QuickTile cover={<LikedCover />} title={t("nav.liked")} onOpen={() => app.navigate({ name: "liked" })} onPlay={() => app.playAll(app.liked, "liked")} dropId="liked" />
-        <QuickTile cover={<Collage covers={covers(app.library)} />} title={t("nav.allMusic")} onOpen={() => app.navigate({ name: "library" })} onPlay={() => app.shuffleLibrary()} playLabel={t("list.shuffleLibrary")} />
+        <QuickTile cover={covers(app.liked, 1, "liked")[0] ? <Cover src={covers(app.liked, 1, "liked")[0]} /> : <LikedCover />} title={t("nav.liked")} onOpen={() => app.navigate({ name: "liked" })} onPlay={() => app.playAll(app.liked, "liked")} dropId="liked" />
+        <QuickTile cover={covers(app.library, 1, "library")[0] ? <Cover src={covers(app.library, 1, "library")[0]} /> : <Cover />} title={t("nav.allMusic")} onOpen={() => app.navigate({ name: "library" })} onPlay={() => app.shuffleLibrary()} playLabel={t("list.shuffleLibrary")} />
         {playlists.slice(0, 6).map((playlist) => {
           const tracks = app.index.members(app.members[playlist.id] ?? []);
           return (
             <QuickTile
               key={playlist.id}
-              cover={<Collage covers={covers(tracks)} />}
+              cover={<Cover src={covers(tracks, 1, `playlist:${playlist.id}`)[0]} />}
               title={playlist.name}
               dropId={`playlist:${playlist.id}`}
               onOpen={() => app.navigate({ name: "playlist", id: playlist.id })}
@@ -72,14 +73,22 @@ export function HomePage() {
         </Shelf>
       )}
 
-      <Shelf title={t("home.playlists")} action={<button type="button" className="link-btn" onClick={() => app.createPlaylist([], true)}><Icons.plus /> {t("playlist.create")}</button>}>
-        <Card cover={<LikedCover />} title={t("nav.liked")} subtitle={t("list.songCount", { count: app.liked.length })} dropId="liked" onOpen={() => app.navigate({ name: "liked" })} onPlay={() => app.playAll(app.liked, "liked")} />
+      <Shelf
+        title={t("home.playlists")}
+        action={
+          <span className="shelf-actions">
+            <SyncButton feature="playlists" playlists quiet />
+            <button type="button" className="link-btn" onClick={() => app.createPlaylist([], true)}><Icons.plus /> {t("playlist.create")}</button>
+          </span>
+        }
+      >
+        <Card cover={covers(app.liked, 1, "liked")[0] ? <Cover src={covers(app.liked, 1, "liked")[0]} /> : <LikedCover />} title={t("nav.liked")} subtitle={t("list.songCount", { count: app.liked.length })} dropId="liked" onOpen={() => app.navigate({ name: "liked" })} onPlay={() => app.playAll(app.liked, "liked")} />
         {playlists.map((playlist) => {
           const tracks = app.index.members(app.members[playlist.id] ?? []);
           return (
             <Card
               key={playlist.id}
-              cover={<Collage covers={covers(tracks)} />}
+              cover={<Cover src={covers(tracks, 1, `playlist:${playlist.id}`)[0]} />}
               title={playlist.name}
               subtitle={t("list.songCount", { count: playlist.count })}
               dropId={`playlist:${playlist.id}`}
@@ -97,7 +106,7 @@ function QuickTile({ cover, title, onOpen, onPlay, dropId, playLabel }: { cover:
   const { t } = useTranslation();
   return (
     <div className="quick-tile" role="button" tabIndex={0} data-drop={dropId} onClick={onOpen} onKeyDown={(event) => {
-      if (event.key === "Enter") onOpen();
+      if (event.key === "Enter" && !(event.target as HTMLElement).closest("button, input, a, select, textarea")) onOpen();
     }}>
       {cover}
       <span className="quick-title">{title}</span>

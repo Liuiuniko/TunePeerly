@@ -1,5 +1,8 @@
 {
-  "boot": { "loading": "正在打开曲库…", "failed": "无法打开曲库。" },
+  "boot": {
+    "loading": "正在打开曲库…",
+    "failed": "无法打开曲库。"
+  },
   "common": {
     "cancel": "取消",
     "choose": "选择…",
@@ -27,6 +30,7 @@
     "albums": "专辑",
     "folders": "文件夹",
     "devices": "设备",
+    "notices": "活动",
     "settings": "设置",
     "back": "后退",
     "forward": "前进",
@@ -49,6 +53,13 @@
     "firstPlaylist": "创建第一个歌单",
     "firstPlaylistBody": "把歌曲拖到这里的歌单上即可加入。",
     "dropHere": "松开以加入"
+  },
+  "top": {
+    "refresh": "刷新",
+    "refreshHelp": "重新加载曲库，并换一批封面",
+    "incognito": "无痕模式",
+    "incognitoOn": "无痕模式开着。再点一下关闭。",
+    "incognitoOff": "打开无痕模式。这台电脑会离线，正在播放的其他设备的歌曲会停下。"
   },
   "status": {
     "incognito": "无痕",
@@ -88,7 +99,12 @@
     "unknownAlbum": "未知专辑",
     "untitled": "未命名"
   },
-  "badge": { "local": "本机", "remote": "远程", "unavailable": "不可用", "error": "无法播放" },
+  "badge": {
+    "local": "本机",
+    "remote": "远程",
+    "unavailable": "不可用",
+    "error": "无法播放"
+  },
   "list": {
     "play": "播放",
     "shuffle": "随机播放",
@@ -103,6 +119,13 @@
     "filter": "在列表中查找",
     "filterPlaceholder": "在列表中查找",
     "sortBy": "排序",
+    "sortColumn": "按这一列排序",
+    "sortAsc": "正序，点击切换为倒序",
+    "sortDesc": "倒序，点击切换为正序",
+    "exposed": "已暴露",
+    "hidden": "未暴露",
+    "exposedHelp": "已配对设备可以播放这首歌",
+    "hiddenHelp": "已配对设备不能播放这首歌",
     "empty": "这里没有歌曲。",
     "noMatch": "没有与“{{text}}”匹配的歌曲。"
   },
@@ -115,7 +138,8 @@
     "album": "专辑",
     "folder": "文件夹",
     "added": "最近添加",
-    "liked": "喜欢的优先"
+    "liked": "喜欢的优先",
+    "duration": "时长"
   },
   "empty": {
     "likedTitle": "你喜欢的歌曲会出现在这里",
@@ -150,7 +174,14 @@
     "exposeAll": "立即全部暴露",
     "hideAll": "全部取消暴露",
     "exposeDefault": "暴露给已配对设备",
-    "hideDefault": "只留在这台电脑"
+    "hideDefault": "只留在这台电脑",
+    "followHint": "歌曲加入时，按全局设置“新的本机歌曲”来决定。这个全局设置可以在 设置 → 曲库 里改，也可以点“全部音乐”页的小眼睛改。",
+    "exposeHint": "加入这里的本机歌曲会立刻提供给已配对设备，不看全局设置。",
+    "hideHint": "加入这里的本机歌曲只留在这台电脑，不看全局设置。",
+    "exposeDefaultHint": "之后新加入的本机歌曲，会立刻提供给已配对设备。",
+    "hideDefaultHint": "之后新加入的本机歌曲只留在这台电脑，直到你手动暴露。",
+    "exposeAllHint": "把这里已有的所有本机歌曲都提供给已配对设备。",
+    "hideAllHint": "不再提供这里已有的本机歌曲，歌曲仍保留在这台电脑。"
   },
   "menu": {
     "play": "播放",
@@ -169,6 +200,21 @@
     "stopExposing": "取消暴露",
     "more": "更多选项"
   },
+  "tray": {
+    "show": "显示",
+    "quit": "退出"
+  },
+  "window": {
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restore": "还原",
+    "close": "关闭",
+    "closeAskTitle": "要关闭播放器吗？",
+    "closeAskBody": "也可以最小化到系统托盘，让它继续在后台运行。",
+    "closeQuit": "退出",
+    "closeTray": "最小化到系统托盘",
+    "closeRemember": "不再提醒"
+  },
   "player": {
     "idle": "选一首歌开始听",
     "play": "播放",
@@ -180,11 +226,16 @@
     "nextShortcut": "下一首（Ctrl+→）",
     "shuffle": "随机播放",
     "libraryRandom": "正在随机播放全部音乐",
-    "repeat": { "off": "不循环", "list": "列表循环", "one": "单曲循环" },
+    "repeat": {
+      "off": "不循环",
+      "list": "列表循环",
+      "one": "单曲循环"
+    },
     "seek": "播放进度",
     "toggleRemaining": "切换总时长和剩余时间",
     "lyrics": "正在播放与歌词",
     "queue": "播放队列",
+    "notices": "通知",
     "mute": "静音",
     "unmute": "取消静音",
     "volume": "音量"
@@ -243,13 +294,44 @@
     "exposed": "已配对设备现在可以播放这些歌曲",
     "hidden": "这些歌曲已取消暴露",
     "synced": "已发送到在线设备",
-    "restartNeeded": "已保存，重启应用后使用新的数据库。"
+    "requested": "已向 {{name}} 请求覆盖这台电脑的内容",
+    "syncDenied": "{{name}} 没有发来{{feature}}"
   },
   "notice": {
-    "offlineTrack": "持有这首歌的设备不在线，或这首歌不在这台电脑上。",
-    "nothingPlayable": "这里暂时没有可以播放的歌曲。",
-    "playbackFailed": "这首歌无法播放。",
-    "incognitoStopped": "已开启无痕模式，来自其他设备的播放已停止。"
+    "empty": "还没有通知。",
+    "clear": "清空",
+    "readAll": "全部已读",
+    "unread": "未读",
+    "more": "更多",
+    "dismiss": "删除这条通知",
+    "openSettings": "通知设置",
+    "markUnread": "标为未读",
+    "pin": "置顶",
+    "unpin": "取消置顶",
+    "clearTitle": "删除通知？",
+    "clearBody": "置顶的通知可以保留。",
+    "clearKeepPinned": "全部删除，保留置顶",
+    "clearAll": "全部删除",
+    "paired": "已配对",
+    "request": "发来了连接请求",
+    "declined": "拒绝了配对请求",
+    "connected": "已连接",
+    "disconnected": "已断开",
+    "blocked": "已拉黑",
+    "unblocked": "已取消拉黑",
+    "sync": "收到了修改",
+    "conflict": "同步冲突",
+    "overwrite": "覆写请求",
+    "detail": {
+      "full": "完全信任",
+      "verify": "每次确认",
+      "incognito": "打开了无痕模式",
+      "keep": "保留了这台电脑的副本",
+      "take": "采用了对方的副本",
+      "ask": "等待选择",
+      "timeout": "一分钟内没有选择，没有覆写",
+      "cancel": "保留了这台电脑的副本"
+    }
   },
   "file": {
     "missing": "文件已不在磁盘上。",
@@ -261,7 +343,9 @@
     "video": "这是一个视频文件。",
     "allSourcesFailed": "没有设备能播放这首歌。"
   },
-  "metadata": { "failed": "无法读取标签，改用文件名显示。" },
+  "metadata": {
+    "failed": "无法读取标签，改用文件名显示。"
+  },
   "problems": {
     "title": "问题列表",
     "help": "无法读取或播放的歌曲。修好文件或文件夹权限后重新扫描。",
@@ -280,10 +364,10 @@
     "nameHelp": "附近和已配对的设备会看到这个名字。",
     "status": "连接",
     "port": "局域网端口 {{port}}",
-    "pairingText": "配对文本",
-    "pairingHelp": "把这段文本发到另一台电脑，在那里的“用文本配对”中粘贴。其中不包含任何歌曲或文件名。",
+    "pairLan": "在这个网络里配对",
+    "pairLanHelp": "第一次配对只在同一局域网里进行。两边都会看到安全码。接受之后，两台设备会记住对方，之后可以通过中继直接重连，不用再配对。",
     "paired": "已配对设备",
-    "noPaired": "还没有配对的设备。在设置中打开设备发现，或在下方用文本配对。",
+    "noPaired": "还没有配对的设备。在设置里打开设备发现，然后和同一网络中的电脑配对。",
     "viaLan": "局域网",
     "viaRelay": "中继",
     "browse": "浏览",
@@ -294,6 +378,22 @@
     "discoveryOff": "设备发现已关闭。在设置中打开后，可以找到同一网络中的电脑。",
     "noNearby": "正在查找网络中运行本应用的电脑…",
     "pair": "配对",
+    "addresses": "IPv4 地址",
+    "addressesHelp": "“公用”网络只有在 Windows 防火墙允许本应用通过时才会列出。其他电脑通过这些地址连接本机。",
+    "noAddresses": "没有可用的网络。请在 Windows 防火墙中允许本应用通过。",
+    "pairVia": "使用 {{address}} 配对",
+    "unreachable": "不可达",
+    "trust": "信任",
+    "trustFull": "完全信任",
+    "trustVerify": "每次确认",
+    "overwriteSilent": "自动静默覆写",
+    "overwriteAsk": "确认后才覆写",
+    "disconnect": "断开",
+    "block": "拉黑",
+    "unblock": "取消拉黑",
+    "blocked": "已拉黑的设备",
+    "noBlocked": "没有拉黑的设备。",
+    "blockHelp": "被拉黑的设备无法连接这台电脑。它发来的请求会被直接丢掉，对方只看到连接失败。你可以在这个清单里看到它。",
     "manual": "按地址连接",
     "manualHelp": "输入另一台电脑设备页上显示的 IPv4 地址和端口。",
     "address": "IPv4 地址",
@@ -307,8 +407,18 @@
     "networkOff": "所有网络功能都已关闭，其他设备无法连到这台电脑。",
     "incognitoOff": "已开启无痕模式，设备发现、同步和共享已暂停。"
   },
-  "link": { "online": "在线", "pending": "等待确认", "offline": "离线", "failed": "连接失败" },
-  "manual": { "dialing": "正在连接…", "connected": "已连接", "failed": "连接失败", "badText": "配对文本无效。" },
+  "link": {
+    "online": "在线",
+    "pending": "等待确认",
+    "offline": "离线",
+    "failed": "连接失败"
+  },
+  "manual": {
+    "dialing": "正在连接…",
+    "connected": "已连接",
+    "failed": "连接失败",
+    "badText": "配对文本无效。"
+  },
   "relay": {
     "off": "未设置中继",
     "connecting": "正在连接中继…",
@@ -319,9 +429,17 @@
   "offer": {
     "title": "与这台设备配对？",
     "body": "{{name}} 请求与这台电脑配对。",
-    "help": "确认前，请核对两边屏幕上的安全码完全一致。",
-    "confirm": "确认",
-    "reject": "拒绝"
+    "waiting": "正在等待 {{name}} 接受。请核对两边屏幕上的安全码完全一致。",
+    "help": "接受前，请核对两边屏幕上的安全码完全一致。",
+    "trustHelp": "完全信任之后会自动重连。每次确认则会在以后的每次连接前再次弹出这个窗口。",
+    "confirm": "接受",
+    "reject": "拒绝",
+    "cancel": "取消"
+  },
+  "overwrite": {
+    "body": "{{device}} 想用它的{{feature}}覆盖这台电脑。{{seconds}} 秒内不选择，就不会覆写。",
+    "keep": "保留我的",
+    "take": "采用对方的"
   },
   "conflict": {
     "body": "{{device}} 上的{{feature}}有更新，而这台电脑上有尚未同步的修改。",
@@ -342,18 +460,22 @@
     "needFolderTitle": "选择下载文件夹",
     "needFolderBody": "下载的歌曲保存到这里，并加入曲库。"
   },
-  "drop": { "title": "松开以添加音乐", "body": "文件夹和音频文件会加入曲库。" },
+  "drop": {
+    "title": "松开以添加音乐",
+    "body": "文件夹和音频文件会加入曲库。"
+  },
   "feature": {
     "favorites": "喜欢的歌曲",
+    "appearance": "外观",
     "theme": "主题",
     "language": "语言",
     "playlists": "歌单",
-    "queue": "播放队列",
     "history": "最近播放"
   },
   "sync": {
     "feature": "项目",
     "source": "跟随",
+    "sourceHelp": "那台设备改了这项之后，自动获取它的副本。上面的“自动发送”是反方向：你的修改发出去。",
     "everything": "全部功能",
     "globalHelp": "套用到每一行，之后仍可单独修改",
     "blockManual": "屏蔽手动",
@@ -364,7 +486,6 @@
     "blockTimestampHelp": "只对最近播放有效：不送出也不接收按 UTC 的合并。",
     "blockAll": "全部屏蔽",
     "blockAllHelp": "不再向外同步，也不再自动跟随。其他设备主动发来的手动同步仍可进入。",
-    "noSource": "不跟随（手动）",
     "thisDevice": "这台电脑",
     "utcMerge": "按时间合并",
     "manualOnly": "手动覆盖",
@@ -374,6 +495,19 @@
     "refreshTitle": "用这台电脑刷新{{feature}}？",
     "sendBody_other": "这台电脑的内容将替换 {{count}} 台在线设备上的内容。",
     "noneOnline": "没有在线的配对设备",
+    "push": "同步给别人",
+    "pull": "覆盖",
+    "pullChoose": "用这台覆盖自己",
+    "pullDefault": "默认",
+    "pullTitle": "用一台已连接设备上的{{feature}}覆盖这台电脑。",
+    "pullPlaylists": "用那台设备的全部歌单覆盖这台电脑上的歌单。",
+    "requestNone": "未指定",
+    "thatDevice": "那台设备",
+    "pushTitle": "把这台电脑的{{feature}}发给所有在线的配对设备。",
+    "pushPlaylists": "发送的是这台电脑上的全部歌单，不只是当前这一个。",
+    "pushOff": "同步数据已关闭。到设置的网络里打开后再发。",
+    "pushIncognito": "无痕模式开着，不会发送。",
+    "pushBlocked": "设置里关掉了这项的手动同步。",
     "dirty": "有尚未同步的修改",
     "waiting": "等待选择"
   },
@@ -383,6 +517,13 @@
     "light": "浅色",
     "dark": "深色",
     "language": "语言",
+    "miniPlayer": "最小化后显示小窗",
+    "miniPlayerHelp": "主窗口最小化后，在屏幕角落留下封面、播放和收藏。",
+    "closeWindow": "关闭窗口时",
+    "closeWindowHelp": "选“每次询问”会再次弹出提示。最小化到托盘后，播放器继续在后台运行。",
+    "closeAsk": "每次询问",
+    "closeTray": "最小化到托盘",
+    "closeQuit": "直接退出",
     "library": "曲库",
     "playbackHelp": "播放原文件，不转码，声音输出到系统默认的输出设备。",
     "noFolders": "还没有添加文件夹或文件。",
@@ -403,6 +544,12 @@
     "historyCap": "最近播放保留条数",
     "historyCapHelp": "超出的旧记录会被删除，范围 1 到 10000。",
     "historyCapInvalid": "请输入 1 到 10000 之间的数字。",
+    "historySync": "同步最近播放",
+    "historySyncHelp": "一首歌播放完成后，这台电脑记下 UTC 时间并发送这次变化。另一台设备只有也打开了这个开关，才会按时间合并进来。两个时间完全一样时，随便排个先后。",
+    "historyStartup": "上线时合并",
+    "historyStartupHelp": "这台电脑上线后，向同样打开了同步的设备收集最近播放，按时间合并，再把结果发给所有设备。没打开同步的设备会静默忽略，不会记入通知。",
+    "historyPause": "暂停记录",
+    "historyPauseHelp": "这台电脑的最近播放不再记录播放完成的歌曲。",
     "historyMode": "最近播放的同步方式",
     "historyUtc": "按时间合并",
     "historyOverwrite": "手动覆盖",
@@ -413,17 +560,39 @@
       "follow": "在下方选择一台设备，这台电脑跟随它的列表。"
     },
     "incognito": "无痕模式",
-    "incognitoHelp": "不写入最近播放，同时暂停设备发现、同步、中继和共享。",
+    "incognitoHelp": "不写入最近播放。打开后这台电脑立刻离线，并切断所有设备连接。",
+    "silence": "拒绝后的静默时间",
+    "silenceHelp": "拒绝配对请求后，对方在这段秒数内不能再发起连接。你仍然可以主动连接它。默认 60 秒。",
+    "silenceInvalid": "请输入 1 到 86400 之间的秒数。",
+    "conflictPolicy": "同步发生冲突时",
+    "conflictPolicyHelp": "另一台设备发来修改，而这台电脑也有还没同步的修改时怎么处理。",
+    "conflictAsk": "每次询问",
+    "conflictKeep": "始终保留我的",
+    "conflictTake": "始终采用对方的",
+    "notices": "通知",
+    "noticeRead": "什么时候去掉未读标记",
+    "noticeReadHelp": "铃铛上的数字是还没读的通知数量。",
+    "noticeReadVisible": "屏幕上能看到多少就去掉多少",
+    "noticeReadOpen": "打开通知栏时全部去掉",
+    "noticeReadClick": "点开单条通知时才去掉",
+    "noticeClear": "清空通知时",
+    "noticeClearHelp": "每次询问会弹出选择。另外两项会直接执行。",
+    "noticeClearAsk": "每次询问",
+    "noticeClearUnpinned": "全部删除，保留置顶",
+    "noticeClearAll": "全部删除",
     "network": "网络",
-    "networkIncognito": "已开启无痕模式。关闭后，这些开关重新生效。",
+    "networkIncognito": "已开启无痕模式。关闭后，发现附近设备、播放进度和中继会重新生效。",
+    "autoSend": "自动发送",
+    "autoSendHelp": "你在这台电脑上改了勾选的项目后，自动把这份内容发给所有在线的已配对设备。这不会把别人的修改拉过来。下面同步表里的“跟随”才是别人改了之后，自动获取到这台电脑。",
     "discovery": "发现附近设备",
-    "discoveryHelp": "在局域网中发现和广播（mDNS），只公开设备名，不公开歌名。",
+    "discoveryHelp": "每隔几秒在局域网里广播一次这台电脑。只公开设备名，不公开歌名。",
     "syncEnabled": "同步数据",
-    "syncEnabledHelp": "与已配对设备交换收藏、歌单、队列、历史、主题和语言。",
+    "syncEnabledHelp": "与已配对设备交换收藏、歌单、历史、主题和语言。",
     "audioShare": "共享音频",
     "audioShareHelp": "让已配对设备看到并播放你暴露的歌曲。",
-    "positionSync": "同步播放位置",
-    "positionSyncHelp": "暂停或切歌时，已配对设备可以从同一位置继续。",
+    "positionSync": "跟随播放",
+    "positionSyncHelp": "底部播放条跟随所选的在线设备。这台电脑不发声，播放按钮保持为播放，进度条跟着对方走。",
+    "positionSyncOff": "不跟随",
     "relay": "中继（strelaysrv）",
     "relayHelp": "通过你自己的中继连接不在同一网络的配对设备，四项都必须填写。",
     "relayHost": "中继地址",
@@ -432,17 +601,39 @@
     "relayIdHelp": "中继证书的标识，确保这台电脑只连接你的中继。",
     "relayToken": "中继 token",
     "sync": "同步",
-    "syncHelp": "未指定设备时，该项只留在这台电脑，直到你点击同步。指定一台设备后，所有在线电脑都跟随它。",
+    "syncHelp": "发送会把这台电脑的副本推给在线设备。覆盖会用一台已连接设备替换这台电脑。表里的“跟随”会在那台设备之后再改时，自动获取它的副本。",
+    "requestDevice": "默认从这台覆盖",
+    "requestDeviceHelp": "覆盖时会标出这台设备。每次点击仍可以改选任何一台已经连接的设备。",
     "syncOffNote": "网络中的“同步数据”已关闭，下面的内容不会发送也不会接收。",
     "storage": "存储",
     "downloadFolder": "下载文件夹",
     "downloadFolderNone": "未设置，第一次下载时会询问。",
-    "databasePath": "数据库文件",
-    "restartHelp": "重启后生效。",
     "lanPort": "局域网端口",
-    "lanPortHelp": "填 0 自动选择空闲端口。当前监听 {{port}}。",
-    "portInvalid": "请输入 1 到 65535 之间的端口。",
-    "deviceId": "设备标识"
+    "lanPortHelp": "已保存,每次启动都使用它。当前监听 {{port}}。",
+    "portInvalid": "请输入 1024 到 65535 之间的端口。",
+    "deviceId": "设备标识",
+    "about": "关于",
+    "overwriteMode": "他人覆盖本机时",
+    "overwriteModeHelp": "对任何已配对设备的“发送”生效。静默覆盖会直接接受,先询问会让你先确认。",
+    "portBusy": "该端口已被占用,请换一个。",
+    "portFallback": "端口 {{saved}} 已被占用，当前暂时监听 {{port}}。保存的端口没有改，下次启动还会再试。"
+  },
+  "about": {
+    "name": "声渡",
+    "version": "版本 {{version}}",
+    "summary": "播放这台电脑上的音乐，并分享给你配对的设备。歌曲直接从原始文件播放。",
+    "license": "开源协议",
+    "licenseName": "AGPL-3.0",
+    "licenseHelp": "你可以自由使用、分享和修改。如果别人通过网络使用修改后的版本，必须以同样的协议向他们提供源代码。",
+    "source": "源代码",
+    "sourceNote": "完整源代码在这个仓库。",
+    "open": "打开",
+    "author": "作者",
+    "copyright": "© 2026 zhebuilds",
+    "privacy": "隐私",
+    "privacyHelp": "没有账号。音乐库、歌单、播放记录和配对信息都保存在你自己的设备上。离开局域网时，这些数据会发到你自己配置的中继服务器，由它转发给其它设备。设备之间使用 libsignal 端到端加密，中继无法读取内容。",
+    "components": "构建于",
+    "componentsHelp": "Tauri、Rust 和 React，以及其它开源组件。这些项目各自保留自己的协议。"
   },
   "format": {
     "hoursMinutes": "{{hours}} 小时 {{minutes}} 分钟",

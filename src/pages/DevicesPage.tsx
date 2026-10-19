@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Link } from "../api";
 import { useApp } from "../app/model";
-import { CommitInput, Row } from "../components/controls";
+import { CommitInput, Row, Select } from "../components/controls";
 import { Icons } from "../ui/icons";
 
 export function relayLabel(relay: string, t: (key: string, options?: Record<string, unknown>) => string): { text: string; tone: string } {
@@ -17,15 +17,12 @@ export function DevicesPage() {
   const { t } = useTranslation();
   const app = useApp();
   const boot = app.boot;
-  const [copied, setCopied] = useState(false);
-  const [showCode, setShowCode] = useState(false);
-  const [paste, setPaste] = useState("");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
   if (!boot) return null;
 
   const settings = app.settings;
-  const networkOff = Boolean(settings.incognito) || (!settings.discovery && !settings.syncEnabled && !settings.audioShare);
+  const networkOff = Boolean(settings.incognito);
   const pairedIds = new Set(boot.links.map((link) => link.deviceId));
   const nearby = boot.nearby.filter((item) => !pairedIds.has(item.deviceId) || boot.links.find((link) => link.deviceId === item.deviceId)?.state !== "online");
   const relay = relayLabel(boot.relay, t);
@@ -34,15 +31,6 @@ export function DevicesPage() {
   const validPort = Number.isInteger(portNumber) && portNumber > 0 && portNumber < 65536;
 
   const run = (action: string, payload: unknown = null) => void api.network(action, payload).catch(app.say);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(boot.pairingText);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch (error) {
-      app.say(error);
-    }
-  };
   const connect = (target: string) => {
     const [address, rawPort] = target.split(":");
     setHost(address);
@@ -86,22 +74,22 @@ export function DevicesPage() {
             </span>
           </div>
         </Row>
-        <div className="pair-code">
-          <div className="setting-text">
-            <div className="setting-title">{t("devices.pairingText")}</div>
-            <div className="setting-help">{t("devices.pairingHelp")}</div>
+        <Row title={t("devices.addresses")} help={t("devices.addressesHelp")}>
+          <div className="address-list">
+            {(boot.localAddresses ?? []).length === 0 ? (
+              <span className="muted small">{t("devices.noAddresses")}</span>
+            ) : (
+              (boot.localAddresses ?? []).map((address) => (
+                <span key={address} className="chip mono static">
+                  {address}
+                </span>
+              ))
+            )}
           </div>
-          <div className="code-box">
-            <code className={showCode ? "" : "blurred"}>{boot.pairingText}</code>
-            <div className="button-row">
-              <button type="button" className="btn soft small" onClick={() => setShowCode((value) => !value)}>
-                {showCode ? <Icons.eyeOff /> : <Icons.eye />} {showCode ? t("common.hide") : t("common.show")}
-              </button>
-              <button type="button" className="btn primary small" onClick={() => void copy()}>
-                {copied ? <Icons.check /> : <Icons.copy />} {copied ? t("common.copied") : t("common.copy")}
-              </button>
-            </div>
-          </div>
+        </Row>
+        <div className="setting-text">
+          <div className="setting-title">{t("devices.pairLan")}</div>
+          <div className="setting-help">{t("devices.pairLanHelp")}</div>
         </div>
       </section>
 
@@ -124,11 +112,32 @@ export function DevicesPage() {
                     {link.state === "online" && ` · ${t("list.songCount", { count: app.tracks.filter((track) => track.holderIds.includes(link.deviceId)).length })}`}
                   </div>
                 </div>
+                <Select
+                  label={t("devices.trust")}
+                  value={link.trust === "verify" ? "verify" : "full"}
+                  onChange={(value) => run("trust", { deviceId: link.deviceId, trust: value })}
+                  options={[
+                    { value: "full", label: t("devices.trustFull") },
+                    { value: "verify", label: t("devices.trustVerify") },
+                  ]}
+                />
+                {link.state === "online" ? (
+                  <button type="button" className="btn ghost small" onClick={() => run("disconnect", link.deviceId)}>
+                    {t("devices.disconnect")}
+                  </button>
+                ) : (
+                  <button type="button" className="btn primary small" onClick={() => run("pair", link.deviceId)}>
+                    {t("devices.connect")}
+                  </button>
+                )}
                 <button type="button" className="btn ghost small" onClick={() => app.navigate({ name: "device", id: link.deviceId })}>
                   {t("devices.browse")}
                 </button>
                 <button type="button" className="icon-btn" aria-label={t("devices.remove")} title={t("devices.remove")} onClick={() => remove(link)}>
                   <Icons.trash />
+                </button>
+                <button type="button" className="btn ghost small danger-text" onClick={() => run("block", link.deviceId)}>
+                  {t("devices.block")}
                 </button>
               </li>
             ))}
@@ -152,10 +161,27 @@ export function DevicesPage() {
                 <span className="device-dot nearby" />
                 <div className="device-text">
                   <div className="device-name static">{item.name || item.deviceId.slice(0, 7)}</div>
-                  <div className="device-sub mono">
-                    {item.host}:{item.port}
+                  <div className="device-sub">
+                    {t("devices.addresses")}
+                    {boot.failures?.[item.deviceId] ? ` · ${t("devices.unreachable")}` : ""}
+                  </div>
+                  <div className="address-list">
+                    {item.hosts.map((address) => (
+                      <button
+                        type="button"
+                        key={address}
+                        className="chip mono"
+                        title={t("devices.pairVia", { address })}
+                        onClick={() => run("pair", { deviceId: item.deviceId, host: address })}
+                      >
+                        {address}:{item.port}
+                      </button>
+                    ))}
                   </div>
                 </div>
+                <button type="button" className="btn ghost small danger-text" aria-label={t("devices.block")} title={t("devices.block")} onClick={() => run("block", item.deviceId)}>
+                  {t("devices.block")}
+                </button>
                 <button type="button" className="btn primary small" onClick={() => run("pair", item.deviceId)}>
                   <Icons.link /> {t("devices.pair")}
                 </button>
@@ -195,16 +221,28 @@ export function DevicesPage() {
       </section>
 
       <section className="panel">
-        <h2>{t("devices.paste")}</h2>
-        <p className="setting-help">{t("devices.pasteHelp")}</p>
-        <textarea className={`input textarea${boot.manual === "badText" ? " invalid" : ""}`} rows={3} value={paste} placeholder={t("devices.pastePlaceholder")} aria-label={t("devices.paste")} onChange={(event) => setPaste(event.target.value)} />
-        <div className="button-row">
-          <button type="button" className="btn primary" disabled={!paste.trim()} onClick={() => run("paste", paste.trim())}>
-            {t("devices.pair")}
-          </button>
-          {boot.manual === "badText" && <span className="state-text failed">{t("manual.badText")}</span>}
-        </div>
+        <h2>{t("devices.blocked")}</h2>
+        <p className="setting-help">{t("devices.blockHelp")}</p>
+        {(boot.blocks ?? []).length === 0 ? (
+          <p className="muted">{t("devices.noBlocked")}</p>
+        ) : (
+          <ul className="device-list">
+            {(boot.blocks ?? []).map((item) => (
+              <li key={item.deviceId} className="device-item">
+                <span className="device-dot offline" />
+                <div className="device-text">
+                  <div className="device-name static">{item.name || item.deviceId.slice(0, 7)}</div>
+                </div>
+                <button type="button" className="btn ghost small" onClick={() => run("unblock", item.deviceId)}>
+                  {t("devices.unblock")}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     </div>
   );
 }
+
+

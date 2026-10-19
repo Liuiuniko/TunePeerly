@@ -9,10 +9,6 @@ pub enum AppError {
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
     #[error(transparent)]
-    Toml(#[from] toml::de::Error),
-    #[error(transparent)]
-    TomlWrite(#[from] toml::ser::Error),
-    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Image(#[from] image::ImageError),

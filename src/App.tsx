@@ -1,18 +1,22 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { transport } from "./player/clock";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { setDropHandler } from "./app/drag";
 import { AppProvider, useApp, type Route } from "./app/model";
 import { ScrollContext } from "./app/scroll";
 import { ContextMenu } from "./components/ContextMenu";
+import { Tooltip } from "./components/Tooltip";
 import { Mascot } from "./components/Mascot";
 import { Banners, Overlays } from "./components/Overlays";
 import { PlayerBar } from "./components/PlayerBar";
+import { CloseGate, WindowControls } from "./components/WindowControls";
 import { QueuePanel } from "./components/QueuePanel";
 import { Sidebar, useSidebarWidth } from "./components/Sidebar";
 import { SEARCH_INPUT_ID, TopBar } from "./components/TopBar";
 import { BrowsePage } from "./pages/BrowsePage";
 import { DevicesPage } from "./pages/DevicesPage";
+import { NoticePanel } from "./components/NoticePanel";
 import { HomePage } from "./pages/HomePage";
 import { NowPlayingPage } from "./pages/NowPlayingPage";
 import { ProblemsPage } from "./pages/ProblemsPage";
@@ -76,6 +80,45 @@ function Shell() {
   }, [app.route]);
 
   useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let stop = () => {};
+    let cancelled = false;
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const unlisten = await listen<{ action: string }>("desktop-action", (event) => {
+        const model = latest.current;
+        switch (event.payload.action) {
+          case "toggle":
+            model.toggle();
+            break;
+          case "play":
+            if (!transport.get().playing) model.toggle();
+            break;
+          case "pause":
+            model.engine.pause();
+            break;
+          case "next":
+            model.next();
+            break;
+          case "previous":
+            model.previous();
+            break;
+          case "like":
+            if (model.current) void model.like(model.current);
+            break;
+          default:
+            break;
+        }
+      });
+      if (cancelled) unlisten();
+      else stop = unlisten;
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+      stop();
+    };
+  }, []);
+
+  useEffect(() => {
     setDropHandler((source, target) => {
       const model = latest.current;
       if (target.type === "playlist") void model.addToPlaylist(target.id, source.tracks);
@@ -88,7 +131,9 @@ function Shell() {
         else model.queueActions.insert(target.index, source.tracks);
       } else if (target.type === "member" && source.type === "member") {
         const to = target.index > source.index ? target.index - 1 : target.index;
-        if (to !== source.index) void model.movePlaylistMember(source.playlistId, source.index, to);
+        if (to === source.index) return;
+        if (source.playlistId === "library") void model.moveLibrary(source.index, to);
+        else void model.movePlaylistMember(source.playlistId, source.index, to);
       }
     });
   }, [t]);
@@ -125,6 +170,7 @@ function Shell() {
     const onKey = (event: KeyboardEvent) => {
       const model = latest.current;
       const ctrl = event.ctrlKey || event.metaKey;
+      if (model.dialog) return;
       if (ctrl && event.key.toLowerCase() === "k") {
         event.preventDefault();
         const input = document.getElementById(SEARCH_INPUT_ID) as HTMLInputElement | null;
@@ -142,7 +188,7 @@ function Shell() {
         else model.forward();
         return;
       }
-      if (typing(event.target) || model.dialog || event.altKey) return;
+      if (typing(event.target) || event.altKey) return;
       const onSlider = (event.target as HTMLElement | null)?.tagName === "INPUT";
       if (event.key === " " || event.code === "Space") {
         if ((event.target as HTMLElement | null)?.closest("button, [role='button']")) return;
@@ -166,8 +212,10 @@ function Shell() {
       }
     };
     const onMouse = (event: MouseEvent) => {
-      if (event.button === 3) latest.current.back();
-      if (event.button === 4) latest.current.forward();
+      const model = latest.current;
+      if (model.dialog || typing(event.target)) return;
+      if (event.button === 3) model.back();
+      if (event.button === 4) model.forward();
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("mouseup", onMouse);
@@ -198,7 +246,7 @@ function Shell() {
 
   return (
     <div
-      className={`app${app.queueOpen ? " queue-open" : ""}`}
+      className={`app${app.queueOpen ? " queue-open" : ""}${app.noticesOpen ? " notices-open" : ""}`}
       onContextMenu={(event) => {
         if (!typing(event.target)) event.preventDefault();
       }}
@@ -228,9 +276,14 @@ function Shell() {
         </ScrollContext.Provider>
       </main>
       {app.queueOpen && <QueuePanel />}
+      {app.noticesOpen && <NoticePanel />}
       <PlayerBar />
+      <WindowControls />
+      <CloseGate />
       <ContextMenu />
+      <Tooltip />
       <Overlays dropping={dropping} />
     </div>
   );
 }
+

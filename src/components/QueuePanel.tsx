@@ -18,9 +18,9 @@ export function QueuePanel() {
 
   return (
     <aside className="queue-panel" aria-label={t("player.queue")}>
-      <header className="queue-head">
+      <header className="queue-head" data-tauri-drag-region>
         <h2>{t("queue.title")}</h2>
-        <button type="button" className="icon-btn" aria-label={t("common.close")} onClick={() => app.setQueueOpen(false)}>
+        <button type="button" className="icon-btn" data-tauri-drag-region="false" aria-label={t("common.close")} onClick={() => app.setQueueOpen(false)}>
           <Icons.close />
         </button>
       </header>
@@ -97,7 +97,12 @@ export function QueuePanel() {
 function QueueRow({ track, current, playing, onPlay, onRemove }: { track: Track; current?: boolean; playing?: boolean; onPlay: () => void; onRemove?: () => void }) {
   const { t } = useTranslation();
   return (
-    <div className={`queue-row${current ? " current" : ""}${track.dimmed ? " dim" : ""}`} onDoubleClick={onPlay}>
+    <div
+      className={`queue-row${current ? " current" : ""}${track.dimmed ? " dim" : ""}`}
+      onDoubleClick={(event) => {
+        if (!(event.target as HTMLElement).closest("button, input, a, select, textarea")) onPlay();
+      }}
+    >
       <button type="button" className="queue-cover" aria-label={t("player.play")} onClick={onPlay}>
         <Cover src={track.coverUrl} />
         <span className="queue-cover-play">{current && playing ? <Icons.pause /> : <Icons.play />}</span>

@@ -87,6 +87,7 @@ export function beginDrag(event: ReactPointerEvent, source: () => DragSource | n
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", up);
     window.removeEventListener("pointercancel", cancel);
+    window.removeEventListener("blur", finish);
     clear();
     ghost?.remove();
     document.body.classList.remove("dragging");
@@ -109,6 +110,7 @@ export function beginDrag(event: ReactPointerEvent, source: () => DragSource | n
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
   window.addEventListener("pointercancel", cancel);
+  window.addEventListener("blur", finish);
 }
 
 /** True for the click event that ends a drag. */

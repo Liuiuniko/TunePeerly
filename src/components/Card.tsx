@@ -6,7 +6,7 @@ export function Card({ cover, title, subtitle, onOpen, onPlay, dropId, active }:
   const { t } = useTranslation();
   return (
     <div className={`card${active ? " active" : ""}`} data-drop={dropId} role="button" tabIndex={0} onClick={onOpen} onKeyDown={(event) => {
-      if (event.key === "Enter") onOpen();
+      if (event.key === "Enter" && !(event.target as HTMLElement).closest("button, input, a, select, textarea")) onOpen();
     }}>
       <div className="card-cover">
         {cover}

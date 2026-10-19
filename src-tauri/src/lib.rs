@@ -1,3 +1,4 @@
+mod desktop;
 mod catalog;
 mod media;
 mod config;
@@ -27,19 +28,17 @@ struct AppState {
     db: Arc<Mutex<Db>>,
     net: net::Network,
     material: IdentityMaterial,
-    app_dir: std::path::PathBuf,
 }
 
-const NETWORK_KEYS: [&str; 9] = [
+const NETWORK_KEYS: [&str; 8] = [
     "discovery",
-    "syncEnabled",
-    "audioShare",
     "incognito",
     "relayHost",
     "relayPort",
     "relayDeviceId",
     "relayToken",
     "displayName",
+    "listenPort",
 ];
 
 fn online_ids(state: &AppState) -> Vec<String> {
@@ -50,8 +49,12 @@ fn online_ids(state: &AppState) -> Vec<String> {
 #[tauri::command(async)]
 fn bootstrap(state: State<'_, AppState>) -> AppResult<Value> {
     let online = online_ids(&state);
+    let local_addresses = net::lan_ipv4().iter().map(|ip| ip.to_string()).collect::<Vec<_>>();
     let db = state.db.lock().expect("db");
     let live = state.net.live.inner.lock().expect("live");
+    let blocks = db.blocks()?;
+    let notices = db.notices()?;
+    let nearby: Vec<_> = live.nearby.iter().filter(|item| !blocks.iter().any(|row| row.device_id == item.device_id)).cloned().collect();
     let pending = db.setting_json("pendingSnapshots")?;
     let pending = pending
         .as_object()
@@ -79,14 +82,18 @@ fn bootstrap(state: State<'_, AppState>) -> AppResult<Value> {
         "history": db.history_keys()?,
         "pending": pending,
         "tracks": catalog::library(&db, &online)?,
-        "config": config::load_config(&state.app_dir)?,
         "listenPort": live.listen_port,
-        "nearby": live.nearby,
+        "portFallback": live.port_fallback,
+        "localAddresses": local_addresses,
+        "nearby": nearby,
         "links": live.links,
         "relay": live.relay,
         "offer": live.offer,
         "download": live.download,
         "manual": live.manual,
+        "failures": live.failures,
+        "blocks": blocks,
+        "notices": notices,
     }))
 }
 
@@ -172,34 +179,7 @@ fn lyrics(state: State<'_, AppState>, local_file_id: String) -> AppResult<String
 
 #[tauri::command(async)]
 fn save_player(state: State<'_, AppState>, state_json: Value) -> AppResult<()> {
-    let db = state.db.lock().expect("db");
-    let before = future_ids(&db.player_json()?);
-    db.save_player_json(&state_json)?;
-    let after = future_ids(&state_json);
-    // Advancing to the next track only drops the head; any other change is a local queue edit.
-    let advanced = before.get(1..).is_some_and(|rest| rest == after.as_slice());
-    let changed = before != after && !advanced;
-    if changed {
-        db.mark_dirty("queue", true)?;
-    }
-    drop(db);
-    if changed {
-        let _ = state.net.tx.send(net::Cmd::AutoSync("queue".into()));
-    }
-    Ok(())
-}
-
-fn future_ids(state: &Value) -> Vec<String> {
-    state
-        .get("future")
-        .and_then(|items| items.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("contentId").and_then(|id| id.as_str()).map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    state.db.lock().expect("db").save_player_json(&state_json)
 }
 
 #[tauri::command(async)]
@@ -210,12 +190,15 @@ fn save_progress(state: State<'_, AppState>, position_sec: f64) -> AppResult<()>
 #[tauri::command(async)]
 fn record_history(state: State<'_, AppState>, content_id: Option<String>, local_file_id: Option<String>) -> AppResult<()> {
     let db = state.db.lock().expect("db");
-    db.record_history_local(content_id.as_deref(), local_file_id.as_deref())?;
-    if db.setting_string("historySyncMode").unwrap_or_else(|_| "utc".into()) != "utc" && content_id.is_some() {
-        db.mark_dirty("history", true)?;
+    if db.setting_bool("incognito").unwrap_or(false) || db.setting_bool("historyPaused").unwrap_or(false) {
+        return Ok(());
     }
+    db.record_history_local(content_id.as_deref(), local_file_id.as_deref())?;
+    let sync = db.setting_bool("historySync").unwrap_or(false);
     drop(db);
-    let _ = state.net.tx.send(net::Cmd::AutoSync("history".into()));
+    if sync {
+        let _ = state.net.tx.send(net::Cmd::AutoSync("history".into()));
+    }
     Ok(())
 }
 
@@ -361,6 +344,12 @@ fn move_playlist_member(state: State<'_, AppState>, playlist_id: String, from: u
 }
 
 #[tauri::command(async)]
+fn set_library_order(state: State<'_, AppState>, keys: Vec<String>) -> AppResult<()> {
+    state.db.lock().expect("db").set_library_order(&keys)?;
+    Ok(())
+}
+
+#[tauri::command(async)]
 fn set_exposure(state: State<'_, AppState>, scope: String, id: String, value: String) -> AppResult<()> {
     let db = state.db.lock().expect("db");
     if scope == "grant" {
@@ -378,6 +367,8 @@ fn expose_members(state: State<'_, AppState>, scope: String, id: String, expose:
     let db = state.db.lock().expect("db");
     if scope == "grant" {
         db.expose_grant_members(id.parse().unwrap_or(0), expose)?;
+    } else if scope == "library" {
+        db.expose_library_members(expose)?;
     } else {
         db.expose_playlist_members(&id, expose)?;
     }
@@ -394,21 +385,43 @@ fn set_track_exposure(state: State<'_, AppState>, local_file_id: String, expose:
 }
 
 #[tauri::command(async)]
-fn update_setting(state: State<'_, AppState>, key: String, value: Value) -> AppResult<()> {
+fn update_setting(app: AppHandle, state: State<'_, AppState>, key: String, value: Value) -> AppResult<()> {
+    if key == "listenPort" {
+        let port = value.as_u64().unwrap_or(0);
+        if !(1024..=65535).contains(&port) {
+            return Err(AppError::Message("settings.portInvalid".into()));
+        }
+        let port = port as u16;
+        let current = state.net.live.inner.lock().map(|live| live.listen_port).unwrap_or(0);
+        if port != current && std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_err() {
+            return Err(AppError::Message("settings.portBusy".into()));
+        }
+    }
     let db = state.db.lock().expect("db");
     if key == "theme" || key == "language" {
         let text = value.as_str().unwrap_or("").to_string();
         db.set_synced(&key, &text)?;
-        db.mark_dirty(&key, true)?;
+        db.mark_dirty("appearance", true)?;
         drop(db);
-        let _ = state.net.tx.send(net::Cmd::AutoSync(key));
+        let _ = state.net.tx.send(net::Cmd::AutoSync("appearance".into()));
         return Ok(());
     }
+    let mini = key == "miniPlayer" && value.as_bool().unwrap_or(false);
+    let appearance = key == "miniPlayer" || key == "closeAction";
     db.set_device_setting(&key, value)?;
+    if appearance {
+        db.mark_dirty("appearance", true)?;
+    }
     if key == "historyCap" {
         db.trim_history()?;
     }
     drop(db);
+    if key == "miniPlayer" {
+        desktop::sync_mini(&app, mini);
+    }
+    if appearance {
+        let _ = state.net.tx.send(net::Cmd::AutoSync("appearance".into()));
+    }
     if NETWORK_KEYS.contains(&key.as_str()) {
         let _ = state.net.tx.send(net::Cmd::Apply);
     }
@@ -416,30 +429,71 @@ fn update_setting(state: State<'_, AppState>, key: String, value: Value) -> AppR
 }
 
 #[tauri::command(async)]
-fn update_config(state: State<'_, AppState>, database_path: String, listen_port: u16) -> AppResult<()> {
-    config::validate_database_path(&database_path)?;
-    let config = config::StartupConfig { database_path, listen_port };
-    config::save_config(&state.app_dir, &config)?;
-    let _ = state.net.tx.send(net::Cmd::Apply);
-    Ok(())
+fn desktop_update(app: AppHandle, track: desktop::DesktopTrack) {
+    desktop::update(&app, track);
+}
+
+#[tauri::command(async)]
+fn desktop_state() -> desktop::DesktopTrack {
+    desktop::current()
+}
+
+#[tauri::command(async)]
+fn desktop_command(app: AppHandle, action: String) {
+    desktop::command(&app, &action);
 }
 
 #[tauri::command(async)]
 fn network_command(state: State<'_, AppState>, action: String, payload: Value) -> AppResult<()> {
     let text = || payload.as_str().unwrap_or("").to_string();
     let cmd = match action.as_str() {
-        "pair" => net::Cmd::Pair(text()),
+        "pair" => net::Cmd::Pair {
+            device_id: payload
+                .get("deviceId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(text),
+            host: payload.get("host").and_then(|v| v.as_str()).map(str::to_string),
+        },
         "manual" => net::Cmd::Manual {
             host: payload.get("host").and_then(|v| v.as_str()).unwrap_or("").trim().to_string(),
             port: payload.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16,
         },
-        "confirm" => net::Cmd::Confirm(text()),
+        "confirm" => net::Cmd::Confirm {
+            device_id: payload.get("deviceId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            trust: payload.get("trust").and_then(|v| v.as_str()).unwrap_or("full").to_string(),
+        },
         "reject" => net::Cmd::Reject(text()),
+        "block" => net::Cmd::Block(text()),
+        "unblock" => net::Cmd::Unblock(text()),
+        "trust" => net::Cmd::Trust {
+            device_id: payload.get("deviceId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            trust: payload.get("trust").and_then(|v| v.as_str()).unwrap_or("full").to_string(),
+        },
+        "clear-notices" => net::Cmd::ClearNotices,
+        "notice" => net::Cmd::Notice {
+            action: payload.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            id: payload.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+            ids: payload
+                .get("ids")
+                .and_then(|v| v.as_array())
+                .map(|items| items.iter().filter_map(|item| item.as_i64()).collect())
+                .unwrap_or_default(),
+        },
         "remove" => net::Cmd::Remove(text()),
+        "disconnect" => net::Cmd::Disconnect(text()),
+        "resolve-overwrite" => net::Cmd::ResolveOverwrite {
+            id: payload.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
+            accept: payload.get("accept").and_then(|v| v.as_bool()).unwrap_or(false),
+        },
         "paste" => net::Cmd::Paste(text()),
         "sync" => net::Cmd::Sync {
             feature: payload.get("feature").and_then(|v| v.as_str()).unwrap_or("favorites").to_string(),
             refresh: payload.get("refresh").and_then(|v| v.as_bool()).unwrap_or(false),
+        },
+        "request-sync" => net::Cmd::RequestSync {
+            feature: payload.get("feature").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            device_id: payload.get("deviceId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         },
         "resolve" => net::Cmd::Resolve {
             feature: payload.get("feature").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -454,6 +508,11 @@ fn network_command(state: State<'_, AppState>, action: String, payload: Value) -
         "position" => net::Cmd::Position {
             content_id: payload.get("contentId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             seconds: payload.get("seconds").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            playing: payload.get("playing").and_then(|v| v.as_bool()).unwrap_or(false),
+            duration: payload.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            title: payload.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            artist: payload.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            album: payload.get("album").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         },
         "close-route" => net::Cmd::CloseRoutes,
         _ => net::Cmd::Apply,
@@ -466,6 +525,14 @@ fn network_command(state: State<'_, AppState>, action: String, payload: Value) -
 fn remote_url(state: State<'_, AppState>, content_id: String, exclude: Option<Vec<String>>) -> AppResult<Value> {
     if state.db.lock().expect("db").setting_bool("incognito")? {
         return Err(AppError::Message("notice.offlineTrack".into()));
+    }
+    if let Some(reason) = state.db.lock().expect("db").unplayable_reason(&content_id)? {
+        match sync_logic::failure_class(&reason) {
+            sync_logic::FailureClass::Decode | sync_logic::FailureClass::Unsupported => {
+                return Err(AppError::Message(reason));
+            }
+            sync_logic::FailureClass::Transport => {}
+        }
     }
     let mut holders: Vec<String> = {
         let db = state.db.lock().expect("db");
@@ -511,6 +578,7 @@ fn move_membership(state: State<'_, AppState>, previous: String, next: String, a
         "UPDATE playlist_tracks SET content_id = ?1 WHERE content_id = ?2",
         rusqlite::params![next, previous],
     )?;
+    db.retarget_library_order(&previous, &next)?;
     db.mark_dirty("favorites", true)?;
     db.mark_dirty("playlists", true)?;
     drop(db);
@@ -519,17 +587,35 @@ fn move_membership(state: State<'_, AppState>, previous: String, next: String, a
     Ok(())
 }
 
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    desktop::quit(&app);
+}
+
+#[tauri::command]
+fn hide_to_tray(app: AppHandle) {
+    desktop::hide_to_tray(&app);
+}
+
+#[tauri::command]
+fn set_tray_menu(app: AppHandle, show: String, quit: String, name: String) {
+    desktop::set_tray_labels(&show, &quit);
+    desktop::set_tray_tooltip(&app, &name);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            desktop::show_main(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data = app.path().data_dir().expect("data dir");
             let cache = app.path().app_cache_dir().expect("cache dir");
             let app_dir = config::app_dir(&data);
-            let startup = config::load_config(&app_dir).expect("config");
-            let database = config::resolve_database_path(&app_dir, &startup);
+            let database = config::database_path(&app_dir);
             let db = Db::open(&database, app_dir.clone(), cache.clone()).expect("database");
             for grant in db.grants().unwrap_or_default() {
                 if Path::new(&grant.path).exists() {
@@ -540,6 +626,7 @@ pub fn run() {
             let db = Arc::new(Mutex::new(db));
             let net = net::spawn(app.handle().clone(), db.clone(), material.clone_for_net())?;
             let _ = net.tx.send(net::Cmd::Apply);
+            let mini = db.lock().expect("db").setting_bool("miniPlayer").unwrap_or(false);
             let worker = BackgroundWork {
                 app: app.handle().clone(),
                 db: db.clone(),
@@ -547,7 +634,9 @@ pub fn run() {
                 tx: net.tx.clone(),
             };
             std::thread::spawn(move || worker.run());
-            app.manage(AppState { db, net, material, app_dir });
+            app.manage(AppState { db, net, material });
+            desktop::install(app.handle());
+            desktop::sync_mini(app.handle(), mini);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -570,19 +659,25 @@ pub fn run() {
             add_to_playlist,
             remove_playlist_member,
             move_playlist_member,
+            set_library_order,
             set_exposure,
             expose_members,
             set_track_exposure,
             update_setting,
-            update_config,
             network_command,
             remote_url,
             playlist_members,
             move_membership,
-            show_in_folder
+            show_in_folder,
+            desktop_update,
+            desktop_state,
+            desktop_command,
+            quit_app,
+            hide_to_tray,
+            set_tray_menu
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Multi-Device Music Player");
+        .expect("error while running TunePeerly");
 }
 
 /// Access checks, covers and content hashing after the window is up. Playback keeps the disk first.

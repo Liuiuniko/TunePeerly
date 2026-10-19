@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -8,14 +9,12 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::sync_logic::{self, HistoryEntry, MemberRef, QueueItem};
+use crate::sync_logic::{self, HistoryEntry, MemberRef};
 
-pub const FEATURES: [&str; 6] = [
+pub const FEATURES: [&str; 4] = [
     "favorites",
-    "theme",
-    "language",
+    "appearance",
     "playlists",
-    "queue",
     "history",
 ];
 
@@ -94,6 +93,9 @@ impl Db {
     fn migrate(&self) -> AppResult<()> {
         self.conn.execute_batch(SCHEMA)?;
         self.add_column_if_missing("local_files", "cover_checked", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("peers", "trust", "TEXT NOT NULL DEFAULT 'full'")?;
+        self.add_column_if_missing("notices", "read", "INTEGER NOT NULL DEFAULT 1")?;
+        self.add_column_if_missing("notices", "pinned", "INTEGER NOT NULL DEFAULT 0")?;
         Ok(())
     }
 
@@ -117,25 +119,47 @@ impl Db {
                 params![key, value.to_string()],
             )?;
         }
-        for (key, value) in [("theme", "light"), ("language", "en")] {
+        for (key, value) in [("theme", "dark"), ("language", "en")] {
             self.conn.execute(
                 "INSERT INTO synced_settings(key, value) VALUES(?1, ?2)
                  ON CONFLICT(key) DO NOTHING",
                 params![key, value],
             )?;
         }
-        for feature in FEATURES {
-            self.conn.execute(
-                "INSERT INTO feature_revisions(feature, revision) VALUES(?1, 0)
-                 ON CONFLICT(feature) DO NOTHING",
-                params![feature],
-            )?;
-        }
+        self.drop_queue_sync()?;
         let name = self.setting_string("displayName")?;
         if name.is_empty() {
             let host = whoami::fallible::hostname().unwrap_or_else(|_| "This computer".into());
             self.set_device_setting("displayName", json!(host))?;
         }
+        let applied = self
+            .conn
+            .query_row(
+                "SELECT value FROM device_settings WHERE key = 'darkDefaultApplied'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        if applied != "true" {
+            if self.synced("theme")?.is_empty() || self.synced("theme")? == "light" {
+                self.set_synced("theme", "dark")?;
+            }
+            self.set_device_setting("darkDefaultApplied", json!(true))?;
+        }
+        Ok(())
+    }
+
+    /// The play queue stays on this computer. Drop leftovers from when it was synced.
+    fn drop_queue_sync(&self) -> AppResult<()> {
+        for key in ["dirty", "pendingSnapshots", "syncSources", "syncBlocks"] {
+            let mut map = self.setting_json(key)?;
+            if map.as_object_mut().is_some_and(|object| object.remove("queue").is_some()) {
+                self.set_device_setting(key, map)?;
+            }
+        }
+        self.conn.execute("DELETE FROM snapshots WHERE feature = 'queue'", [])?;
+        self.conn.execute("DELETE FROM feature_revisions WHERE feature = 'queue'", [])?;
         Ok(())
     }
 
@@ -312,28 +336,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn feature_revision(&self, feature: &str) -> AppResult<i64> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT revision FROM feature_revisions WHERE feature = ?1",
-                params![feature],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(0))
-    }
-
-    pub fn bump_feature_revision(&self, feature: &str) -> AppResult<i64> {
-        let next = self.feature_revision(feature)? + 1;
-        self.conn.execute(
-            "INSERT INTO feature_revisions(feature, revision) VALUES(?1, ?2)
-             ON CONFLICT(feature) DO UPDATE SET revision = excluded.revision",
-            params![feature, next],
-        )?;
-        Ok(next)
-    }
-
     pub fn mark_dirty(&self, feature: &str, dirty: bool) -> AppResult<()> {
         let mut map = self.setting_json("dirty")?;
         if !map.is_object() {
@@ -402,6 +404,11 @@ impl Db {
             "UPDATE local_files SET exposed = ?1 WHERE grant_id = ?2",
             params![expose, id],
         )?;
+        Ok(())
+    }
+
+    pub fn expose_library_members(&self, expose: bool) -> AppResult<()> {
+        self.conn.execute("UPDATE local_files SET exposed = ?1", params![expose])?;
         Ok(())
     }
 
@@ -519,6 +526,48 @@ impl Db {
         Ok(())
     }
 
+    pub fn library_positions(&self) -> AppResult<HashMap<String, i64>> {
+        let mut stmt = self.conn.prepare("SELECT track_key, position FROM library_order")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+    }
+
+    /// Saves the All music order. Keys missing from `keys` drop out; new files sort after these.
+    pub fn set_library_order(&self, keys: &[String]) -> AppResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM library_order", [])?;
+        let mut seen = HashSet::new();
+        let mut position = 0i64;
+        for key in keys {
+            if key.is_empty() || !seen.insert(key.clone()) {
+                continue;
+            }
+            position += 1;
+            tx.execute(
+                "INSERT INTO library_order(track_key, position) VALUES(?1, ?2)",
+                params![key, position],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn retarget_library_order(&self, previous: &str, next: &str) -> AppResult<()> {
+        let exists: Option<i64> = self
+            .conn
+            .query_row("SELECT position FROM library_order WHERE track_key = ?1", params![next], |row| row.get(0))
+            .optional()?;
+        if exists.is_some() {
+            self.conn.execute("DELETE FROM library_order WHERE track_key = ?1", params![previous])?;
+        } else {
+            self.conn.execute(
+                "UPDATE library_order SET track_key = ?1 WHERE track_key = ?2",
+                params![next, previous],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn remove_member(
         &self,
         playlist_id: &str,
@@ -633,9 +682,12 @@ impl Db {
     }
 
     pub fn favorite_content_ids(&self) -> AppResult<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT content_id FROM favorites WHERE content_id IS NOT NULL")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT COALESCE(f.content_id, lf.content_id)
+             FROM favorites f
+             LEFT JOIN local_files lf ON lf.local_file_id = f.local_file_id
+             WHERE COALESCE(f.content_id, lf.content_id) IS NOT NULL",
+        )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -746,8 +798,12 @@ impl Db {
 
     pub fn history_for_sync(&self) -> AppResult<Vec<HistoryEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT content_id, played_at FROM play_history
-             WHERE content_id IS NOT NULL ORDER BY played_at DESC",
+            "SELECT COALESCE(h.content_id, lf.content_id), MAX(h.played_at)
+             FROM play_history h
+             LEFT JOIN local_files lf ON lf.local_file_id = h.local_file_id
+             WHERE COALESCE(h.content_id, lf.content_id) IS NOT NULL
+             GROUP BY COALESCE(h.content_id, lf.content_id)
+             ORDER BY MAX(h.played_at) DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -826,20 +882,6 @@ impl Db {
         self.save_player_json(&state)
     }
 
-    pub fn queue_items_from_state(&self) -> AppResult<Vec<QueueItem>> {
-        let state = self.player_json()?;
-        Ok(parse_queue_items(state.get("future")))
-    }
-
-    pub fn current_content_from_state(&self) -> AppResult<Option<String>> {
-        let state = self.player_json()?;
-        Ok(state
-            .get("current")
-            .and_then(|item| item.get("contentId"))
-            .and_then(|value| value.as_str())
-            .map(str::to_string))
-    }
-
     pub fn history_keys(&self) -> AppResult<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT COALESCE(content_id, local_file_id) FROM play_history
@@ -850,28 +892,6 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn applied_revision(&self, feature: &str, source_device_id: &str) -> AppResult<i64> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT revision FROM snapshots WHERE feature = ?1 AND source_device_id = ?2",
-                params![feature, source_device_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(0))
-    }
-
-    pub fn record_snapshot(&self, feature: &str, source_device_id: &str, revision: i64, payload: &str) -> AppResult<()> {
-        self.conn.execute(
-            "INSERT INTO snapshots(feature, source_device_id, revision, payload, signature)
-             VALUES(?1, ?2, ?3, ?4, x'')
-             ON CONFLICT(feature, source_device_id) DO UPDATE SET revision = excluded.revision, payload = excluded.payload",
-            params![feature, source_device_id, revision, payload],
-        )?;
-        Ok(())
-    }
-
     pub fn playlist_snapshot(&self) -> AppResult<Value> {
         let lists = self.playlists()?;
         let mut out = Vec::new();
@@ -879,7 +899,7 @@ impl Db {
             let members = self
                 .content_member_refs("playlist", Some(&list.id))?
                 .into_iter()
-                .filter_map(|member| member.content_id)
+                .filter_map(|member| self.resolved_content_id(member.content_id, member.local_file_id))
                 .collect::<Vec<_>>();
             out.push(json!({"id": list.id, "name": list.name, "members": members}));
         }
@@ -940,6 +960,20 @@ impl Db {
             }
         }
         Ok(())
+    }
+
+    fn resolved_content_id(&self, content_id: Option<String>, local_file_id: Option<String>) -> Option<String> {
+        if let Some(id) = content_id.filter(|id| !id.is_empty()) {
+            return Some(id);
+        }
+        let local_file_id = local_file_id?;
+        self.conn
+            .query_row(
+                "SELECT content_id FROM local_files WHERE local_file_id = ?1 AND content_id IS NOT NULL",
+                params![local_file_id],
+                |row| row.get(0),
+            )
+            .ok()
     }
 
     pub fn content_member_refs(&self, table: &str, owner: Option<&str>) -> AppResult<Vec<MemberRef>> {
@@ -1010,6 +1044,17 @@ impl Db {
         Ok(())
     }
 
+    pub fn unplayable_reason(&self, content_id: &str) -> AppResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT unplayable_reason FROM content_items WHERE content_id = ?1 AND unplayable = 1",
+                params![content_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn content_unplayable(&self, content_id: &str) -> AppResult<bool> {
         Ok(self
             .conn
@@ -1058,7 +1103,7 @@ impl Db {
 
     pub fn peers(&self) -> AppResult<Vec<PeerRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT device_id, identity_public, cert_der, cert_id, display_name, safety_number FROM peers",
+            "SELECT device_id, identity_public, cert_der, cert_id, display_name, safety_number, trust FROM peers",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(PeerRow {
@@ -1068,6 +1113,7 @@ impl Db {
                 cert_id: row.get(3)?,
                 display_name: row.get(4)?,
                 safety_number: row.get(5)?,
+                trust: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1075,21 +1121,23 @@ impl Db {
 
     pub fn upsert_peer(&self, peer: &PeerRow) -> AppResult<()> {
         self.conn.execute(
-            "INSERT INTO peers(device_id, identity_public, cert_der, cert_id, display_name, safety_number)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO peers(device_id, identity_public, cert_der, cert_id, display_name, safety_number, trust)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(device_id) DO UPDATE SET
                identity_public = excluded.identity_public,
                cert_der = excluded.cert_der,
                cert_id = excluded.cert_id,
                display_name = excluded.display_name,
-               safety_number = excluded.safety_number",
+               safety_number = excluded.safety_number,
+               trust = excluded.trust",
             params![
                 peer.device_id,
                 peer.identity_public,
                 peer.cert_der,
                 peer.cert_id,
                 peer.display_name,
-                peer.safety_number
+                peer.safety_number,
+                peer.trust
             ],
         )?;
         Ok(())
@@ -1122,6 +1170,135 @@ impl Db {
         self.set_device_setting("syncSources", sources)?;
         Ok(())
     }
+
+    pub fn set_peer_trust(&self, device_id: &str, trust: &str) -> AppResult<()> {
+        let trust = if trust == "verify" { "verify" } else { "full" };
+        self.conn.execute("UPDATE peers SET trust = ?2 WHERE device_id = ?1", params![device_id, trust])?;
+        Ok(())
+    }
+
+    /// This computer's own policy for incoming manual overwrites: `silent` or `ask`.
+    pub fn overwrite_mode(&self) -> AppResult<String> {
+        let value = self.setting_json("overwriteMode")?;
+        Ok(if value.as_str() == Some("ask") { "ask" } else { "silent" }.into())
+    }
+
+    pub fn is_blocked(&self, device_id: &str) -> AppResult<bool> {
+        let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM blocks WHERE device_id = ?1", params![device_id], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    pub fn blocks(&self) -> AppResult<Vec<BlockRow>> {
+        let mut stmt = self.conn.prepare("SELECT device_id, name, blocked_at FROM blocks ORDER BY blocked_at DESC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(BlockRow { device_id: row.get(0)?, name: row.get(1)?, blocked_at: row.get(2)? })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn block_device(&self, device_id: &str, name: &str) -> AppResult<()> {
+        self.conn.execute(
+            "INSERT INTO blocks(device_id, name, blocked_at) VALUES(?1, ?2, ?3)
+             ON CONFLICT(device_id) DO UPDATE SET name = excluded.name",
+            params![device_id, name, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn unblock_device(&self, device_id: &str) -> AppResult<()> {
+        self.conn.execute("DELETE FROM blocks WHERE device_id = ?1", params![device_id])?;
+        Ok(())
+    }
+
+    /// Incoming attempts from this device are dropped until the silence window ends.
+    pub fn silence(&self, device_id: &str) -> AppResult<()> {
+        let seconds = self.setting_i64("silenceSeconds").unwrap_or(60).clamp(1, 24 * 60 * 60);
+        let until = Utc::now().timestamp_millis() + seconds * 1000;
+        let mut map = self.setting_json("silenced").unwrap_or(json!({}));
+        if !map.is_object() {
+            map = json!({});
+        }
+        map[device_id] = json!(until);
+        self.set_device_setting("silenced", map)
+    }
+
+    pub fn silence_active(&self, device_id: &str) -> bool {
+        let Ok(map) = self.setting_json("silenced") else { return false };
+        let until = map.get(device_id).and_then(|value| value.as_i64()).unwrap_or(0);
+        until > Utc::now().timestamp_millis()
+    }
+
+    pub fn add_notice(&self, kind: &str, device_id: &str, name: &str, detail: &str) -> AppResult<()> {
+        self.conn.execute(
+            "INSERT INTO notices(at, kind, device_id, name, detail, read, pinned) VALUES(?1, ?2, ?3, ?4, ?5, 0, 0)",
+            params![Utc::now().to_rfc3339(), kind, device_id, name, detail],
+        )?;
+        self.conn.execute(
+            "DELETE FROM notices WHERE pinned = 0 AND id NOT IN (SELECT id FROM notices WHERE pinned = 0 ORDER BY id DESC LIMIT 200)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn notices(&self) -> AppResult<Vec<NoticeRow>> {
+        // Block, unblock, and decline are local actions. Drop any already stored.
+        self.conn.execute(
+            "DELETE FROM notices WHERE kind IN ('blocked', 'unblocked', 'declined') OR (kind = 'disconnected' AND detail = 'incognito') OR (kind = 'sync' AND detail = 'queue') OR (kind = 'conflict' AND detail LIKE 'queue:%')",
+            [],
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, at, kind, device_id, name, detail, read, pinned FROM notices ORDER BY pinned DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(NoticeRow {
+                id: row.get(0)?,
+                at: row.get(1)?,
+                kind: row.get(2)?,
+                device_id: row.get(3)?,
+                name: row.get(4)?,
+                detail: row.get(5)?,
+                read: row.get::<_, i64>(6)? != 0,
+                pinned: row.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn set_notice_read(&self, id: i64, read: bool) -> AppResult<()> {
+        self.conn.execute("UPDATE notices SET read = ?2 WHERE id = ?1", params![id, i64::from(read)])?;
+        Ok(())
+    }
+
+    pub fn mark_notices_read(&self, ids: &[i64]) -> AppResult<()> {
+        for id in ids {
+            self.set_notice_read(*id, true)?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_all_notices_read(&self) -> AppResult<()> {
+        self.conn.execute("UPDATE notices SET read = 1 WHERE read = 0", [])?;
+        Ok(())
+    }
+
+    pub fn set_notice_pinned(&self, id: i64, pinned: bool) -> AppResult<()> {
+        self.conn.execute("UPDATE notices SET pinned = ?2 WHERE id = ?1", params![id, i64::from(pinned)])?;
+        Ok(())
+    }
+
+    pub fn delete_notice(&self, id: i64) -> AppResult<()> {
+        self.conn.execute("DELETE FROM notices WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn clear_notices(&self, keep_pinned: bool) -> AppResult<()> {
+        if keep_pinned {
+            self.conn.execute("DELETE FROM notices WHERE pinned = 0", [])?;
+        } else {
+            self.conn.execute("DELETE FROM notices", [])?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1132,6 +1309,28 @@ pub struct PeerRow {
     pub cert_id: String,
     pub display_name: String,
     pub safety_number: String,
+    pub trust: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockRow {
+    pub device_id: String,
+    pub name: String,
+    pub blocked_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeRow {
+    pub id: i64,
+    pub at: String,
+    pub kind: String,
+    pub device_id: String,
+    pub name: String,
+    pub detail: String,
+    pub read: bool,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1152,30 +1351,6 @@ pub struct BlockFlags {
     pub source: bool,
     pub timestamp: bool,
     pub all: bool,
-}
-
-pub fn parse_queue_items(value: Option<&Value>) -> Vec<QueueItem> {
-    let Some(items) = value.and_then(|item| item.as_array()) else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| {
-            if let Some(id) = item.get("contentId").and_then(|value| value.as_str()).filter(|id| !id.is_empty()) {
-                return Some(QueueItem::Content(id.to_string()));
-            }
-            if let Some(id) = item.get("localFileId").and_then(|value| value.as_str()).filter(|id| !id.is_empty()) {
-                return Some(QueueItem::Local(id.to_string()));
-            }
-            let kind = item.get("kind")?.as_str()?;
-            let id = item.get("id")?.as_str()?;
-            match kind {
-                "content" => Some(QueueItem::Content(id.to_string())),
-                "local" => Some(QueueItem::Local(id.to_string())),
-                _ => None,
-            }
-        })
-        .collect()
 }
 
 pub fn fts_query(query: &str) -> String {
@@ -1203,12 +1378,16 @@ fn device_defaults() -> Vec<(&'static str, Value)> {
         ("showUnavailable", json!(true)),
         ("historyCap", json!(100)),
         ("historySyncMode", json!("utc")),
+        ("historySync", json!(false)),
+        ("historyStartup", json!(false)),
+        ("historyPaused", json!(false)),
         ("incognito", json!(false)),
         ("syncSources", json!({})),
         ("dirty", json!({})),
         ("syncBlocks", json!({})),
         ("exposeDefault", json!("hide")),
         ("positionSync", json!(false)),
+        ("positionSyncDevice", json!("")),
         ("downloadFolder", json!("")),
         ("volume", json!(1.0)),
         ("window", json!({})),
@@ -1217,12 +1396,22 @@ fn device_defaults() -> Vec<(&'static str, Value)> {
         ("relayDeviceId", json!("")),
         ("relayToken", json!("")),
         ("discovery", json!(false)),
-        ("syncEnabled", json!(false)),
-        ("audioShare", json!(false)),
+        ("syncEnabled", json!(true)),
+        ("audioShare", json!(true)),
+        ("autoSend", json!({})),
         ("displayName", json!("")),
         ("holdingsRevision", json!(0)),
         ("pendingSnapshots", json!({})),
         ("manualAddresses", json!([])),
+        ("closeAction", json!("")),
+        ("silenceSeconds", json!(60)),
+        ("conflictPolicy", json!("ask")),
+        ("overwriteMode", json!("silent")),
+        ("listenPort", json!(0)),
+        ("syncRequestDevice", json!("")),
+        ("noticeRead", json!("visible")),
+        ("noticeClear", json!("ask")),
+        ("silenced", json!({})),
     ]
 }
 
@@ -1299,6 +1488,11 @@ CREATE TABLE IF NOT EXISTS holding_revisions (
     device_id TEXT PRIMARY KEY,
     revision INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS remote_covers (
+    content_id TEXT PRIMARY KEY,
+    path TEXT,
+    tried_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS playback_notes (
     id INTEGER PRIMARY KEY,
     source_device_id TEXT,
@@ -1371,7 +1565,21 @@ CREATE TABLE IF NOT EXISTS peers (
     cert_der BLOB NOT NULL,
     cert_id TEXT NOT NULL,
     display_name TEXT NOT NULL,
-    safety_number TEXT NOT NULL
+    safety_number TEXT NOT NULL,
+    trust TEXT NOT NULL DEFAULT 'full'
+);
+CREATE TABLE IF NOT EXISTS blocks (
+    device_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    blocked_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notices (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    detail TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS signal_state (
     key TEXT PRIMARY KEY,
@@ -1389,6 +1597,10 @@ CREATE TABLE IF NOT EXISTS pending_content_move (
     local_file_id TEXT PRIMARY KEY,
     previous_content_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS library_order (
+    track_key TEXT PRIMARY KEY,
+    position INTEGER NOT NULL
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(
     local_file_id,
     content_id,
@@ -1398,19 +1610,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(
     folder
 );
 "#;
-
-pub fn apply_queue_state(state: &mut Value, future: &[QueueItem]) {
-    if !state.is_object() {
-        *state = json!({});
-    }
-    state["future"] = json!(future
-        .iter()
-        .map(|item| match item {
-            QueueItem::Content(id) => json!({"key": id, "contentId": id, "localFileId": null}),
-            QueueItem::Local(id) => json!({"key": id, "contentId": null, "localFileId": id}),
-        })
-        .collect::<Vec<_>>());
-}
 
 pub fn merge_history_into_db(db: &Db, remote: Vec<HistoryEntry>) -> AppResult<Vec<HistoryEntry>> {
     let local = db.history_for_sync()?;
