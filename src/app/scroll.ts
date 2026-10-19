@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import { createContext, useContext, type RefObject } from "react";
 
 export const ScrollContext = createContext<RefObject<HTMLDivElement | null> | null>(null);

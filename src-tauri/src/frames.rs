@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 use std::io;
 
 pub const MAX_PAYLOAD: usize = 32 * 1024;

@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;

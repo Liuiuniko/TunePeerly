@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;

@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import type { MemberRef, Track } from "../api";
 import type { TrackRef } from "../player/advance";
 

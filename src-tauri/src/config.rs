@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 use std::path::{Path, PathBuf};
 
 pub const APP_DIR_NAME: &str = "TunePeerly";

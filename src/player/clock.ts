@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 type Clock = { position: number; duration: number };
 type Transport = { playing: boolean };
 

@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 export type MascotMood = "idle" | "playing" | "paused" | "error";
 
 /** A small vinyl creature. It only appears on Now Playing and the empty library. */

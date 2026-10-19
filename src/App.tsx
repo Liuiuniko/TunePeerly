@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { transport } from "./player/clock";
 import { useEffect, useRef, useState } from "react";

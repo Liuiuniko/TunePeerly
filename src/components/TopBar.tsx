@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useApp } from "../app/model";

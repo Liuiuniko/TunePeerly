@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import en from "./en.json";

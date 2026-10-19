@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useApp, type RouteName } from "../app/model";

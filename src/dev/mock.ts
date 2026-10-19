@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 /* Browser-only stand-in for the Tauri backend, used by `npm run dev` outside the app window. */
 import type { Bootstrap, Link, MemberRef, Playlist, Track } from "../api";
 

@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import { useEffect, useRef, useState } from "react";
 
 /** Rounded hover tips that replace the square native `title` tooltips. */

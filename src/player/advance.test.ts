@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import assert from "node:assert/strict";
 import test from "node:test";
 import {

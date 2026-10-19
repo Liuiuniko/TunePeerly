@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import type { CSSProperties, ReactNode } from "react";
 
 export function PageHeader({ kind, title, cover, meta, tint }: { kind?: string; title: string; cover: ReactNode; meta?: ReactNode; tint?: string }) {

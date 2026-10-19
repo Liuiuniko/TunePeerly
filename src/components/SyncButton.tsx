@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Feature } from "../api";

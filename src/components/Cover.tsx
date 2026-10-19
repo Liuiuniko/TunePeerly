@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import { useState } from "react";
 import { api } from "../api";
 import { Icons } from "../ui/icons";

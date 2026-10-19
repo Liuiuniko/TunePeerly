@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 //! Window chrome and the system “now playing” surface.
 //!
 //! Windows replaces the taskbar thumbnail with a media card (the whole cover) and shows the song on the lock screen.

@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

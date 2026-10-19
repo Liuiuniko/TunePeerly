@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { Track } from "../api";
 

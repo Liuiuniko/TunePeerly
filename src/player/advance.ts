@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 export type OrderMode = "manual" | "listShuffle" | "libraryRandom";
 export type RepeatMode = "off" | "list" | "one";
 

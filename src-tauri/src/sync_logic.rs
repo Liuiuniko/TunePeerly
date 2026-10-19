@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 //! Snapshot and history rules. These functions do not read the network.
 
 use chrono::{DateTime, Duration, Utc};

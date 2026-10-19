@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 export type LyricLine = { time: number; text: string };
 export type Lyrics = { timed: boolean; lines: LyricLine[] };
 

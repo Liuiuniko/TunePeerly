@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 //! App device ids come from the Signal identity public key.
 //! Relay certificate ids use the strelaysrv / Syncthing device-id algorithm
 //! on the certificate's raw bytes.

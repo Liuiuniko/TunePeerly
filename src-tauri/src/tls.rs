@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 use std::sync::Arc;
 
 use rustls::client::danger::ServerCertVerifier;

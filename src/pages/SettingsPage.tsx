@@ -1,3 +1,4 @@
+// Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, pickFolder, type BlockFlags, type Feature, type Grant } from "../api";
