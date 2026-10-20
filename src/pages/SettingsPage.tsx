@@ -12,7 +12,6 @@ import { relayLabel } from "./DevicesPage";
 const SOURCE_URL = "https://github.com/zhebuilds/TunePeerly";
 const LICENSE_URL = "https://www.gnu.org/licenses/agpl-3.0.html";
 const TERMS_URL = `${SOURCE_URL}/blob/main/ADDITIONAL_TERMS.md`;
-const MARKS_URL = `${SOURCE_URL}/blob/main/TRADEMARKS.md`;
 const FALLBACK_VERSION = "0.6.0";
 
 function openLink(url: string) {

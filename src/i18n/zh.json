@@ -631,11 +631,9 @@
     "components": "构建于",
     "componentsHelp": "Tauri、Rust 和 React，以及其它开源组件。这些项目各自保留自己的协议。",
     "credits": "版权与许可",
-    "creditsOriginal": "原始作品 © 2026 zhebuilds。基于 TunePeerly。",
-    "creditsModify": "修改版可以写上自己的作者，也可以重新设计这个页面。它必须保留原始作品声明，标明自己是修改版，并且不能把自己说成 TunePeerly 或声渡的官方版本。",
-    "creditsBrand": "TunePeerly、声渡和官方图标用来标识官方版本。其他产品把它们用作自己的名称或标志，需要事先许可。如实写明一个版本基于 TunePeerly 是允许的。",
-    "additionalTerms": "附加条款",
-    "trademarks": "品牌政策"
+    "creditsOriginal": "原始作品 © 2026 zhebuilds。",
+    "creditsModify": "修改版可以写上自己的作者，也可以重新设计这个页面。它必须保留原始作品声明，并注明这是基于 zhebuilds 的一个修改版本。",
+    "additionalTerms": "附加条款"
   },
   "format": {
     "hoursMinutes": "{{hours}} 小时 {{minutes}} 分钟",
