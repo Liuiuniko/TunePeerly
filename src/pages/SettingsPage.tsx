@@ -18,7 +18,7 @@ function openLink(url: string) {
   if ("__TAURI_INTERNALS__" in window) {
     void import("@tauri-apps/plugin-opener")
       .then(({ openUrl }) => openUrl(url))
-      .catch(() => {});
+      .catch(() => { });
     return;
   }
   window.open(url, "_blank", "noopener,noreferrer");
@@ -178,7 +178,7 @@ export function SettingsPage() {
             onChange={(value) => {
               void app.setSetting("historySync", value).then(() => {
                 if (!value) void app.setSetting("historyStartup", false);
-                else void api.network("sync", { feature: "history", refresh: true }).catch(() => {});
+                else void api.network("sync", { feature: "history", refresh: true }).catch(() => { });
               });
             }}
           />
@@ -411,7 +411,7 @@ function AboutPanel({ nodeRef }: { nodeRef: (node: HTMLElement | null) => void }
       .then((value) => {
         if (!gone && value) setVersion(value);
       })
-      .catch(() => {});
+      .catch(() => { });
     return () => {
       gone = true;
     };
@@ -430,7 +430,6 @@ function AboutPanel({ nodeRef }: { nodeRef: (node: HTMLElement | null) => void }
       <h3>{t("about.credits")}</h3>
       <p className="setting-help">{t("about.creditsOriginal")}</p>
       <p className="setting-help">{t("about.creditsModify")}</p>
-      <p className="setting-help">{t("about.creditsBrand")}</p>
       <Row title={t("about.license")} help={t("about.licenseHelp")}>
         <button type="button" className="btn soft" onClick={() => openLink(LICENSE_URL)}>
           {t("about.licenseName")} <Icons.external />
@@ -438,11 +437,6 @@ function AboutPanel({ nodeRef }: { nodeRef: (node: HTMLElement | null) => void }
       </Row>
       <Row title={t("about.additionalTerms")}>
         <button type="button" className="btn soft" onClick={() => openLink(TERMS_URL)}>
-          {t("about.open")} <Icons.external />
-        </button>
-      </Row>
-      <Row title={t("about.trademarks")}>
-        <button type="button" className="btn soft" onClick={() => openLink(MARKS_URL)}>
           {t("about.open")} <Icons.external />
         </button>
       </Row>
