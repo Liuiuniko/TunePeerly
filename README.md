@@ -1,27 +1,37 @@
-English | [简体中文](README.zh-CN.md)
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" width="192" height="192" alt="TunePeerly">
+</p>
 
-# TunePeerly
+<h1 align="center">TunePeerly（声渡）</h1>
 
-TunePeerly (声渡) plays the music already on your computer and shares it with the devices you pair. There is no account. Songs play from the original files. Paired devices on the same local network find each other directly. A relay you run can be configured for connections outside that network. The Relay heading is marked not completed yet, not tested, and do not use.
+<p align="center">
+  English |
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+TunePeerly plays the music already on this computer and shares it with paired devices. There is no account. Paired devices on the same local network find each other directly. A relay you run yourself can be used for connections outside that network.
+
+> **Note:** The current release is an alpha test. The program is not guaranteed to match the [user guide](docs/guide.md).
 
 ## Features
 
 - Play local files, stream an exposed song from a paired device, or download the original file.
-- Find devices on the LAN or connect by IPv4 address and port. Both sides confirm. Sync traffic is end-to-end encrypted with libsignal.
-- Sync liked songs and appearance as a full copy. Auto send pushes your edits out. Follow pulls later edits from one device. Send and Override are manual.
-- Merge recently played by the latest UTC time. A song is recorded after about 10 seconds, or half its length. Optionally merge again when this computer comes online.
-- Follow playback from one online device. The bar at the bottom shows that device's song and moves with it. This computer stays silent.
+- Find devices on the LAN, or connect by IPv4 address and port. Both sides confirm. Sync data is end-to-end encrypted with libsignal.
+- Recently played merges by the latest UTC time. A song is recorded after about 10 seconds, or half its length. It can be merged again when this computer comes online.
+- Sync liked songs and appearance, and follow playback from one online device.
 - Incognito pauses discovery, sync, and history recording. You can also block a device, or stop manual sync and following per item.
-- Light and dark themes, English and Chinese, synced lyrics, a tray icon, a mini player, and playback buttons on the Windows taskbar thumbnail.
+- Light and dark themes, English and Chinese, scrolling lyrics, a tray icon, a mini player, and playback buttons on the Windows taskbar thumbnail.
 - Some settings are marked **To be revised**, **Do not use**, or **Not completed yet, not tested**. The mark does not describe the problem. The [user guide](docs/guide.md) lists which setting has which mark. Follow playback and the relay are marked do not use. The relay is also marked not completed yet and not tested.
 
 ## Guide
 
 [User guide](docs/guide.md)
 
-## Data
+## Install
 
-The app keeps its database at `%APPDATA%\TunePeerly\library.db`. Cover images are under `%LOCALAPPDATA%\TunePeerly\covers`. The program name is `TunePeerly.exe`.
+GitHub releases are packed with [Inno Setup](installer/TunePeerly.iss). The installer asks whether to install for all users or only for the current user. The default is the current user, at `C:\Users\<name>\AppData\Local\Programs\TunePeerly`, and it does not need administrator rights. Installing for all users uses `C:\Program Files\TunePeerly` and needs administrator rights.
+
+The database and the cache do not follow that choice, and they cannot be changed on their own. The database is always `%APPDATA%\TunePeerly`. Covers and the window cache are always in `%LOCALAPPDATA%\TunePeerly`.
 
 ## Develop
 
@@ -35,7 +45,16 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 npm run tauri build
 ```
 
-`npm run tauri build` produces the Windows installers. The NSIS installer is the default. An MSI is also produced when the WiX Toolset is installed. The installer can download WebView2 if it is missing. It does not register a firewall rule.
+## Installer
+
+Run these from the repository root. Build the release program first, then compile [installer/TunePeerly.iss](installer/TunePeerly.iss). The script takes `src-tauri\target\release\TunePeerly.exe`. [Inno Setup 7](https://jrsoftware.org/isinfo.php) must be installed.
+
+```powershell
+npm run tauri build -- --no-bundle
+& "${env:ProgramFiles}\Inno Setup 7\ISCC.exe" installer\TunePeerly.iss
+```
+
+`npm run tauri build -- --no-bundle` builds the executable only. It does not create an installer. The setup program is written to `installer\Output\TunePeerly-0.6.0-alpha.1-x64-Setup.exe`. `installer\Output` is gitignored. You can also open `installer\TunePeerly.iss` in Inno Setup and compile it.
 
 ## Project
 
@@ -44,4 +63,4 @@ npm run tauri build
 
 ## License
 
-[GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html). Additional terms for attribution and modified versions are in [ADDITIONAL_TERMS.md](ADDITIONAL_TERMS.md). Names and the logo are covered by [TRADEMARKS.md](TRADEMARKS.md).
+[GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html). Additional terms for attribution and modified versions are in [ADDITIONAL_TERMS.md](ADDITIONAL_TERMS.md).

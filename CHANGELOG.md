@@ -8,7 +8,7 @@ TunePeerly plays local audio from the original file, streams an exposed song fro
 
 Liked songs and appearance can sync as a full copy. Recently played is recorded after about 10 seconds, or half the song, and can merge by UTC time. Incognito cuts device connections and stops discovery, sync, and history recording. Device block and per-item sync blocks are included. The app has light and dark themes, English and Chinese, lyrics, a tray icon, a mini player, and playback buttons on the Windows taskbar thumbnail.
 
-The program is `TunePeerly.exe`. The database is `%APPDATA%\TunePeerly\library.db`. Cover images are under `%LOCALAPPDATA%\TunePeerly\covers`.
+The program is `TunePeerly.exe`. The database is in `%APPDATA%\TunePeerly`. Covers and the window cache are in `%LOCALAPPDATA%\TunePeerly`.
 
 Some settings are marked because they are not finished. **To be revised** means this version keeps the current behavior. **Do not use** means do not use it, because the feature has problems. **Not completed yet, not tested** and **Do not use** are on Relay. Its client is included. It is not completed yet, and it has not been tested. The guide lists which setting has which mark. The mark does not describe the problem. Follow playback is also marked do not use.
 

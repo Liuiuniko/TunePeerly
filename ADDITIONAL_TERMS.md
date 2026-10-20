@@ -12,7 +12,6 @@ When you distribute a work based on this project, keep a reasonable notice of th
 
 ```text
 Original work © 2026 zhebuilds
-Based on TunePeerly
 ```
 
 You may add your own name and copyright for your modifications. You may redesign the About screen. You may not remove the original-work notice or present the original work as solely your own.
@@ -21,26 +20,14 @@ You may add your own name and copyright for your modifications. You may redesign
 
 AGPLv3 section 7(c).
 
-A modified version must identify itself, in a reasonable way, as modified and as different from the original TunePeerly release. Do not change or remove notices so that a modified version looks like the unmodified original.
+A modified version must say, in a reasonable way, that it is a modified version based on work by zhebuilds. Do not change or remove that notice so the modified version looks like the unmodified original.
 
 A clear statement is:
 
 ```text
-This is an independent modified version, not an official TunePeerly or 声渡 release.
+This is a modified version based on work by zhebuilds.
 Modifications © [your name]
 ```
-
-## Do not use the author's name to promote a fork
-
-AGPLv3 section 7(d).
-
-Do not use the name zhebuilds to advertise, endorse, or promote a modified version without prior written permission. A factual statement that the version is based on work by zhebuilds is allowed.
-
-## No trademark license
-
-AGPLv3 section 7(e).
-
-These terms do not grant any right to use the project names or logo as a trademark. The rules for those names and the logo are in `TRADEMARKS.md`.
 
 ## Where this notice lives
 
@@ -60,7 +47,6 @@ The original source files of this project are covered by AGPLv3 plus these addit
 
 ```text
 Original work © 2026 zhebuilds
-Based on TunePeerly
 ```
 
 你可以为自己的修改加上自己的名字和版权。你可以重新设计关于页面。你不能删掉原始作品声明，也不能把原始作品说成完全是你自己的。
@@ -69,26 +55,14 @@ Based on TunePeerly
 
 对应 AGPLv3 第 7(c) 条。
 
-修改版必须以合理方式标明自己是修改过的，并且与原来的 TunePeerly 版本不同。不要改动或删除声明，使修改版看起来像未经修改的原版。
+修改版必须以合理方式注明：这是基于 zhebuilds 的作品的一个修改版本。不要改动或删除这条声明，使修改版看起来像未经修改的原版。
 
 一句清楚的说明是：
 
 ```text
-This is an independent modified version, not an official TunePeerly or 声渡 release.
+This is a modified version based on work by zhebuilds.
 Modifications © [你的名字]
 ```
-
-### 不要用作者的名字为分支做宣传
-
-对应 AGPLv3 第 7(d) 条。
-
-未经事先书面许可，不要用 zhebuilds 这个名字为修改版做广告、背书或推广。如实写明该版本基于 zhebuilds 的作品，是允许的。
-
-### 不授予商标许可
-
-对应 AGPLv3 第 7(e) 条。
-
-这些条款不授予把项目名称或标志当作商标使用的权利。名称和标志的规则见 `TRADEMARKS.md`。
 
 ### 这份声明放在哪里
 
