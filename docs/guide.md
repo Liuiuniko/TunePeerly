@@ -56,7 +56,7 @@ The rest of this guide says what those controls are for.
 
 ## Pair a device
 
-Open **Devices**. **Paired devices**, **Nearby**, and **Connect by address** are marked **To be revised**.
+Open **Devices**. **Paired devices**, **Nearby**, and **Connect by address** are marked **To be revised**. Before pairing, **Discover nearby devices** in Settings → Network must be on, or devices cannot be found.
 
 - **Discover nearby devices** announces this computer's name about every 3 seconds, over UDP multicast.
 - You can also type another computer's IPv4 address and port.

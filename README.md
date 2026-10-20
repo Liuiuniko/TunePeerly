@@ -16,7 +16,7 @@ TunePeerly plays the music already on this computer and shares it with paired de
 ## Features
 
 - Play local files, stream an exposed song from a paired device, or download the original file.
-- Find devices on the LAN, or connect by IPv4 address and port. Both sides confirm. Sync data is end-to-end encrypted with libsignal.
+- Find devices on the LAN, or connect by IPv4 address and port. Both sides confirm. Sync data is end-to-end encrypted with libsignal. Before pairing, **Discover nearby devices** in Settings → Network must be on, or devices cannot be found.
 - Recently played merges by the latest UTC time. A song is recorded after about 10 seconds, or half its length. It can be merged again when this computer comes online.
 - Sync liked songs and appearance, and follow playback from one online device.
 - Incognito pauses discovery, sync, and history recording. You can also block a device, or stop manual sync and following per item.
