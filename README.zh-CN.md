@@ -64,6 +64,10 @@ npm run tauri build -- --no-bundle
 
 编译停在 `EndUpdateResource failed (110)` 时，是往新安装包写入图标的时候文件被占用了。Windows Defender 实时扫描会锁住这个未签名的 exe，安全中心不会弹出提示。等几秒后重新执行上面的 `ISCC.exe` 命令，不要紧接着失败立刻再编译。如果还是 这样，把仓库里的 `installer\Output` 加进 Windows 安全中心的排除项后再编译。路径是：病毒和威胁防护 → 管理设置 → 排除项 → 添加排除项 → 文件夹。
 
+## 贡献
+
+贡献流程在 [CONTRIBUTING.md](CONTRIBUTING.md)。先开 issue，讨论确定后再开发。
+
 ## 项目
 
 - [更新日志](CHANGELOG.md)

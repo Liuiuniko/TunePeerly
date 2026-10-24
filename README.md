@@ -64,6 +64,10 @@ npm run tauri build -- --no-bundle
 
 A compile that stops at `EndUpdateResource failed (110)` means the new setup program was locked while its icons were being written. Windows Defender real-time scanning locks that unsigned exe, and Windows Security does not show a prompt. Wait a few seconds and run the `ISCC.exe` command above again. Do not compile again immediately after the failure. If it is still 110, add the repository's `installer\Output` folder to the Windows Security exclusions and compile again: Virus & threat protection → Manage settings → Exclusions → Add an exclusion → Folder.
 
+## Contributing
+
+The contribution process is in [CONTRIBUTING.md](CONTRIBUTING.md). Open an issue and wait until it is confirmed before writing code.
+
 ## Project
 
 - [Changelog](CHANGELOG.md)
