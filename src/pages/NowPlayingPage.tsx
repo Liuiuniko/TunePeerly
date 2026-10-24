@@ -108,7 +108,11 @@ function LyricsPanel({ lyrics, hasLocal, seekable, mirror }: { lyrics: Lyrics | 
     if (active < 0 || !box.current || Date.now() - userScroll.current < 4000) return;
     const node = box.current.querySelector<HTMLElement>(`[data-line="${active}"]`);
     if (!node) return;
-    const target = node.offsetTop - box.current.clientHeight / 2 + node.clientHeight / 2;
+    // offsetTop would resolve against the nearest positioned ancestor rather than
+    // the panel itself, so measure from the two rects instead.
+    const boxRect = box.current.getBoundingClientRect();
+    const offset = node.getBoundingClientRect().top - boxRect.top + box.current.scrollTop;
+    const target = offset - box.current.clientHeight / 2 + node.clientHeight / 2;
     box.current.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
   }, [active]);
 
