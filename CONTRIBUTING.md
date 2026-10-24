@@ -74,9 +74,9 @@ git push --force-with-lease origin fix/short-name
 
 Open the pull request against `zhebuilds/TunePeerly`, with `main` as the base. Link the confirmed issue, say what changed, and say how you checked it.
 
-After the pull request is merged, delete the branch and update your `main` from `upstream` again.
+After the pull request is merged, update your `main` from `upstream` again.
 
-Contributions are covered by the [GNU AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html) and [ADDITIONAL_TERMS.md](ADDITIONAL_TERMS.md), the same terms as the project.
+Contributions are under the [GNU AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html) and [ADDITIONAL_TERMS.md](ADDITIONAL_TERMS.md).
 
 # 贡献
 
@@ -154,6 +154,6 @@ git push --force-with-lease origin fix/short-name
 
 向 `zhebuilds/TunePeerly` 开 pull request，目标分支是 `main`。写上已确认的 issue、改了什么，以及你如何检查的。
 
-Pull request 合并之后，删掉这个分支，并再次用 `upstream` 更新你的 `main`。
+Pull request 合并之后，再次用 `upstream` 更新你的 `main`。
 
-贡献适用与本项目相同的 [GNU AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html) 和 [ADDITIONAL_TERMS.md](ADDITIONAL_TERMS.md)。
+贡献适用 [GNU AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html) 和 [ADDITIONAL_TERMS.md](ADDITIONAL_TERMS.md)。
