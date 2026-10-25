@@ -6,6 +6,10 @@
 
 #define MyAppName "TunePeerly"
 #define MyAppVersion "0.6.0"
+; Prerelease suffix used in the installer file name only. Keep it non-empty: the
+; OutputBaseFilename line below joins the three defines with "-", so an empty value
+; would produce "TunePeerly-0.6.0--x64-Setup".
+#define MyAppRelease "alpha.1"
 #define MyAppPublisher "zhebuilds"
 #define MyAppURL "https://github.com/zhebuilds/TunePeerly"
 #define MyAppExeName "TunePeerly.exe"
@@ -46,7 +50,7 @@ InfoBeforeFile=ADDITIONAL_TERMS.txt
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=Output
-OutputBaseFilename=TunePeerly-0.6.0-alpha.1-x64-Setup
+OutputBaseFilename={#MyAppName}-{#MyAppVersion}-{#MyAppRelease}-x64-Setup
 SetupIconFile=..\src-tauri\icons\icon.ico
 SolidCompression=yes
 WizardStyle=modern dynamic
