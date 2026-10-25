@@ -190,7 +190,10 @@ function Shell() {
         return;
       }
       if (typing(event.target) || event.altKey) return;
-      const onSlider = (event.target as HTMLElement | null)?.tagName === "INPUT";
+      const element = event.target as HTMLElement | null;
+      const onSlider = element?.tagName === "INPUT";
+      // widgets that own the arrow keys themselves (the sidebar splitter) must not seek
+      const onWidget = !!element?.closest("[role='separator'], [role='slider']");
       if (event.key === " " || event.code === "Space") {
         if ((event.target as HTMLElement | null)?.closest("button, [role='button']")) return;
         event.preventDefault();
@@ -207,7 +210,7 @@ function Shell() {
       } else if (ctrl && event.key === "ArrowDown") {
         event.preventDefault();
         model.setVolume(model.volume - 0.05);
-      } else if (!ctrl && !event.shiftKey && !onSlider && (event.key === "ArrowLeft" || event.key === "ArrowRight") && model.current) {
+      } else if (!ctrl && !event.shiftKey && !onSlider && !onWidget && (event.key === "ArrowLeft" || event.key === "ArrowRight") && model.current) {
         event.preventDefault();
         model.engine.skip(event.key === "ArrowRight" ? 5 : -5);
       }

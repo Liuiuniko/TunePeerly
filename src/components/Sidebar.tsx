@@ -108,6 +108,12 @@ export function Sidebar({ width, collapsed, onResize, onCollapse }: { width: num
   };
 
   const onHandleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    // The window-level shortcut listener in App.tsx also reacts to ←/→ (seek ±5s).
+    // Keys consumed by this handle must not reach it, or resizing the sidebar
+    // would move playback at the same time.
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") {
+      event.stopPropagation();
+    }
     if (event.key === "Home") {
       event.preventDefault();
       onCollapse(true);
