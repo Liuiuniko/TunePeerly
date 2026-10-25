@@ -10,20 +10,24 @@
   --line: rgba(74, 48, 24, 0.1);
   --line-strong: rgba(74, 48, 24, 0.18);
   --text: #2b231c;
-  --muted: #76695c;
+  --muted: #6f6254;
   --faint: #a7998a;
   --accent: #e0683a;
   --accent-hover: #cc5a2e;
   --accent-soft: rgba(224, 104, 58, 0.13);
-  --accent-text: #c4552a;
+  --accent-text: #b84a22;
+  --accent-strong: #b84a22;
+  --accent-strong-hover: #a8431f;
   --on-accent: #fffaf5;
   --good: #3a9a6b;
   --good-soft: rgba(58, 154, 107, 0.14);
   --warn: #c28a1e;
   --warn-soft: rgba(194, 138, 30, 0.15);
   --bad: #cf4a46;
+  --bad-text: #ab2e28;
   --bad-soft: rgba(207, 74, 70, 0.12);
   --info: #4a7fc1;
+  --info-text: #3a68a4;
   --info-soft: rgba(74, 127, 193, 0.13);
   --shadow: 0 12px 32px rgba(60, 36, 16, 0.16), 0 2px 6px rgba(60, 36, 16, 0.08);
   --r-xl: 22px;
@@ -52,14 +56,18 @@
   --accent-hover: #ff9160;
   --accent-soft: rgba(240, 127, 76, 0.16);
   --accent-text: #ff9a69;
+  --accent-strong: #f07f4c;
+  --accent-strong-hover: #ff9160;
   --on-accent: #1d120b;
   --good: #5cc28d;
   --good-soft: rgba(92, 194, 141, 0.15);
   --warn: #e0b04a;
   --warn-soft: rgba(224, 176, 74, 0.15);
   --bad: #ef6b66;
+  --bad-text: #ef6b66;
   --bad-soft: rgba(239, 107, 102, 0.15);
   --info: #79a7e3;
+  --info-text: #79a7e3;
   --info-soft: rgba(121, 167, 227, 0.15);
   --shadow: 0 16px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
   color-scheme: dark;
@@ -274,7 +282,7 @@ body.resizing * {
 
 /* The queue entry toggles a panel instead of changing page, so it is tinted rather than filled. */
 .nav-item[aria-pressed="true"] {
-  color: var(--accent);
+  color: var(--accent-text);
   background: transparent;
 }
 
@@ -290,7 +298,7 @@ body.resizing * {
   height: 16px;
   padding: 0 4px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
   font-size: 10.5px;
   font-weight: 700;
@@ -560,7 +568,7 @@ body.resizing * {
   max-width: 280px;
   padding: 8px 14px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
   font-weight: 600;
   font-size: 13px;
@@ -683,7 +691,7 @@ body.resizing * {
 
 .round-btn.on,
 .round-btn.on:hover:not(:disabled) {
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
 }
 
@@ -751,7 +759,7 @@ body.resizing * {
   height: 16px;
   padding: 0 4px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
   font-size: 10px;
   line-height: 16px;
@@ -947,7 +955,7 @@ body.resizing * {
 }
 
 .status-pill.accent {
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
 }
 
@@ -964,7 +972,7 @@ body.resizing * {
   height: 16px;
   padding: 0 4px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
   font-size: 10px;
   font-weight: 700;
@@ -1168,12 +1176,12 @@ body.resizing * {
 }
 
 .btn.primary {
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
 }
 
 .btn.primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-strong-hover);
 }
 
 .btn.soft {
@@ -1271,7 +1279,7 @@ body.resizing * {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
   box-shadow: 0 6px 16px rgba(224, 104, 58, 0.32);
   transition: transform 0.12s, background 0.12s;
@@ -1285,7 +1293,7 @@ body.resizing * {
 
 .play-fab:hover:not(:disabled) {
   transform: scale(1.05);
-  background: var(--accent-hover);
+  background: var(--accent-strong-hover);
 }
 
 .play-fab:disabled {
@@ -1512,7 +1520,7 @@ body.resizing * {
 }
 
 .select-option.selected {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .select-check {
@@ -1699,12 +1707,12 @@ body.resizing * {
 
 .badge.remote {
   background: var(--info-soft);
-  color: var(--info);
+  color: var(--info-text);
 }
 
 .badge.unavailable {
   background: var(--hover);
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .badge.error {
@@ -1787,7 +1795,7 @@ body.resizing * {
   height: 22px;
   padding: 0 7px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
   font-size: 12px;
   font-weight: 700;
@@ -2443,7 +2451,7 @@ body.resizing * {
 .c-source .badge.local {
   background: transparent;
   padding: 0;
-  color: var(--faint);
+  color: var(--muted);
   font-weight: 600;
 }
 
@@ -2452,7 +2460,7 @@ body.resizing * {
   height: 18px;
   padding: 0;
   background: transparent;
-  color: var(--faint);
+  color: var(--muted);
   font-weight: 600;
 }
 
@@ -2585,7 +2593,7 @@ body.resizing * {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.25);
   opacity: 0;
@@ -2605,7 +2613,7 @@ body.resizing * {
 }
 
 .card-play:hover {
-  background: var(--accent-hover);
+  background: var(--accent-strong-hover);
   transform: scale(1.06) !important;
 }
 
@@ -2690,7 +2698,7 @@ body.resizing * {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
   box-shadow: 0 6px 14px rgba(0, 0, 0, 0.2);
   opacity: 0;
@@ -3549,7 +3557,7 @@ body.resizing * {
 .setting-mark.danger {
   background: var(--bad-soft);
   border-color: transparent;
-  color: var(--bad);
+  color: var(--bad-text);
 }
 
 .setting-help {
@@ -4824,7 +4832,7 @@ button.device-name:hover {
 }
 
 .mini-ctrl.play:hover:not(:disabled) {
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--on-accent);
   transform: scale(1.06);
 }
