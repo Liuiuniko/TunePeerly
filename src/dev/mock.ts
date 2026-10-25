@@ -1,6 +1,7 @@
 // Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 /* Browser-only stand-in for the Tauri backend, used by `npm run dev` outside the app window. */
 import type { Bootstrap, Link, MemberRef, Playlist, Track } from "../api";
+import { version as appVersion } from "../../package.json";
 
 type Callback = (payload: unknown) => void;
 const params = new URLSearchParams(location.search);
@@ -297,7 +298,7 @@ async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<
       window.open(String(args.url), "_blank", "noopener");
       return null;
     case "plugin:app|version":
-      return "0.1.0";
+      return appVersion;
     case "bootstrap":
       return bootstrap();
     case "library":
