@@ -51,6 +51,13 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 npm run tauri build
 ```
 
+如果 `npm run tauri dev` 停在 `listen EACCES: permission denied ::1:1420`，是 Windows NAT 保留了 1420 端口，并没有程序在监听它。用管理员身份打开 PowerShell，执行下面两条命令，再重新运行 `npm run tauri dev`。停止 Windows NAT 期间，已有的 Hyper-V、WSL 和 Docker NAT 连接会断开，服务重新启动后恢复。
+
+```powershell
+net stop winnat
+net start winnat
+```
+
 ## 安装包
 
 在仓库根目录执行。先生成发布版程序，再编译 [installer/TunePeerly.iss](installer/TunePeerly.iss)。脚本从 `src-tauri\target\release\TunePeerly.exe` 取文件，需要已安装的 [Inno Setup 7](https://jrsoftware.org/isinfo.php)。

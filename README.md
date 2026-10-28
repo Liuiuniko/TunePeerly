@@ -51,6 +51,13 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 npm run tauri build
 ```
 
+If `npm run tauri dev` stops with `listen EACCES: permission denied ::1:1420`, Windows NAT has reserved port 1420. No program is listening on it. Open PowerShell as administrator, run the two commands below, then run `npm run tauri dev` again. Stopping Windows NAT drops existing Hyper-V, WSL, and Docker NAT connections until the service starts again.
+
+```powershell
+net stop winnat
+net start winnat
+```
+
 ## Installer
 
 Run these from the repository root. Build the release program first, then compile [installer/TunePeerly.iss](installer/TunePeerly.iss). The script takes `src-tauri\target\release\TunePeerly.exe`. [Inno Setup 7](https://jrsoftware.org/isinfo.php) must be installed.
