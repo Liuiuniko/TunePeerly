@@ -67,6 +67,38 @@ struct Prepared {
     unreadable: bool,
 }
 
+/// Adds one finished download to the grant of its folder without rescanning the rest of the folder.
+pub fn import_downloaded_file(db: &Arc<Mutex<Db>>, directory: &Path, file: &Path) -> AppResult<ImportSummary> {
+    if !directory.is_dir() || !file.is_file() {
+        return Err(AppError::Message("file.missing".into()));
+    }
+    let path_text = directory.to_string_lossy().to_string();
+    let (grant_id, existing) = {
+        let guard = db.lock().expect("db");
+        let grant_id = guard.insert_grant("directory", &path_text)?;
+        adopt_orphans(&guard, grant_id, directory, true)?;
+        (grant_id, existing_rows(&guard, grant_id)?)
+    };
+    let files = if is_audio_candidate(file) { vec![file.to_path_buf()] } else { Vec::new() };
+    let prepared = prepare_files(directory, true, &files, &existing);
+
+    let guard = db.lock().expect("db");
+    guard.conn.execute_batch("BEGIN IMMEDIATE")?;
+    match write_prepared(&guard, grant_id, &prepared, &existing) {
+        Ok((added, updated)) => match guard.conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(ImportSummary { kind: "directory".into(), path: path_text, grant_id, added, updated, missing: 0 }),
+            Err(error) => {
+                let _ = guard.conn.execute_batch("ROLLBACK");
+                Err(error.into())
+            }
+        },
+        Err(error) => {
+            let _ = guard.conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
 /// Walks a grant and reads tags without holding the database, then writes the batch in one transaction.
 pub fn import_path(db: &Arc<Mutex<Db>>, path: &Path, kind: &str) -> AppResult<ImportSummary> {
     let kind = match kind {
@@ -752,7 +784,8 @@ pub struct HashJob {
 }
 
 /// The preferred file is the one the player just used; other files wait their turn by import time.
-pub fn next_hash_job(db: &Db, prefer: Option<&str>, only_prefer: bool) -> AppResult<Option<HashJob>> {
+/// Files in `waiting` failed recently and are passed over until their retry time.
+pub fn next_hash_job(db: &Db, prefer: Option<&str>, only_prefer: bool, waiting: &HashSet<String>) -> AppResult<Option<HashJob>> {
     let map = |row: &rusqlite::Row<'_>| {
         Ok(HashJob {
             local_file_id: row.get(0)?,
@@ -762,29 +795,37 @@ pub fn next_hash_job(db: &Db, prefer: Option<&str>, only_prefer: bool) -> AppRes
         })
     };
     if let Some(prefer) = prefer {
-        let job = db
-            .conn
-            .query_row(
-                "SELECT local_file_id, absolute_path, mtime_ms, size_bytes FROM local_files
-                 WHERE local_file_id = ?1 AND content_id IS NULL AND access_status = 'available'",
-                params![prefer],
-                map,
-            )
-            .ok();
-        if job.is_some() || only_prefer {
-            return Ok(job);
+        if waiting.contains(prefer) {
+            if only_prefer {
+                return Ok(None);
+            }
+        } else {
+            let job = db
+                .conn
+                .query_row(
+                    "SELECT local_file_id, absolute_path, mtime_ms, size_bytes FROM local_files
+                     WHERE local_file_id = ?1 AND content_id IS NULL AND access_status = 'available'",
+                    params![prefer],
+                    map,
+                )
+                .ok();
+            if job.is_some() || only_prefer {
+                return Ok(job);
+            }
         }
     }
-    Ok(db
-        .conn
-        .query_row(
-            "SELECT local_file_id, absolute_path, mtime_ms, size_bytes FROM local_files
-             WHERE content_id IS NULL AND access_status = 'available'
-             ORDER BY added_at LIMIT 1",
-            [],
-            map,
-        )
-        .ok())
+    let mut stmt = db.conn.prepare(
+        "SELECT local_file_id, absolute_path, mtime_ms, size_bytes FROM local_files
+         WHERE content_id IS NULL AND access_status = 'available'
+         ORDER BY added_at",
+    )?;
+    let rows = stmt.query_map([], map)?;
+    for job in rows.flatten() {
+        if !waiting.contains(&job.local_file_id) {
+            return Ok(Some(job));
+        }
+    }
+    Ok(None)
 }
 
 /// Reads the whole file in 1 MiB blocks. Runs without the database lock.

@@ -624,6 +624,7 @@ pub fn run() {
                 db: db.clone(),
                 live: net.live.clone(),
                 tx: net.tx.clone(),
+                hash_retry: Default::default(),
             };
             std::thread::spawn(move || worker.run());
             app.manage(AppState { db, net, material });
@@ -679,6 +680,8 @@ struct BackgroundWork {
     db: Arc<Mutex<Db>>,
     live: net::Live,
     tx: tokio::sync::mpsc::UnboundedSender<net::Cmd>,
+    /// Files whose hash failed for a passing reason: when to try again, and how many tries so far.
+    hash_retry: std::cell::RefCell<std::collections::HashMap<String, (Instant, u32)>>,
 }
 
 impl BackgroundWork {
@@ -736,13 +739,20 @@ impl BackgroundWork {
         if playing && (!buffer_enough || serving) {
             return false;
         }
+        let now = Instant::now();
+        let waiting: std::collections::HashSet<String> =
+            self.hash_retry.borrow().iter().filter(|(_, (at, _))| *at > now).map(|(id, _)| id.clone()).collect();
         let job = self
             .db
             .lock()
             .ok()
-            .and_then(|guard| scan::next_hash_job(&guard, current, playing).ok().flatten());
+            .and_then(|guard| scan::next_hash_job(&guard, current, playing, &waiting).ok().flatten());
         let Some(job) = job else { return false };
-        match scan::compute_content_id(&job.path) {
+        let result = scan::compute_content_id(&job.path);
+        if result.is_ok() {
+            self.hash_retry.borrow_mut().remove(&job.local_file_id);
+        }
+        match result {
             Ok(content_id) => {
                 if let Ok(guard) = self.db.lock() {
                     if scan::finish_hash(&guard, &job, &content_id).unwrap_or(false) {
@@ -758,10 +768,16 @@ impl BackgroundWork {
                 let permanent = matches!(err.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied);
                 let playing_this = playing && current == Some(job.local_file_id.as_str());
                 if permanent && !playing_this {
+                    self.hash_retry.borrow_mut().remove(&job.local_file_id);
                     if let Ok(guard) = self.db.lock() {
                         let _ = scan::mark_unreadable(&guard, &job.local_file_id);
                     }
                 } else {
+                    // Back off this file (30 s, doubling, at most 30 min) so the files after it keep moving.
+                    let mut retry = self.hash_retry.borrow_mut();
+                    let tries = retry.get(&job.local_file_id).map(|(_, tries)| tries + 1).unwrap_or(1);
+                    let wait = Duration::from_secs(30u64.saturating_mul(1 << (tries - 1).min(6)).min(30 * 60));
+                    retry.insert(job.local_file_id.clone(), (Instant::now() + wait, tries));
                     return false;
                 }
             }

@@ -132,6 +132,9 @@ pub struct LiveInner {
     pub history_waiting: HashSet<String>,
     pub history_deadline: Option<Instant>,
     pub history_done: bool,
+    /// Copies this computer asked for with "sync-request", keyed by device and feature, until the deadline.
+    /// Only these replies may skip the overwrite question.
+    pub sync_requests: HashMap<String, Instant>,
 }
 
 pub enum Cmd {
@@ -433,7 +436,7 @@ async fn run(
                         send_sync(&db, &material, &mut store, &peers, &feature, refresh).await;
                     }
                     Cmd::RequestSync { feature, device_id } => {
-                        request_sync(&db, &material, &mut store, &peers, &feature, &device_id).await;
+                        request_sync(&db, &material, &mut store, &peers, &live, &feature, &device_id).await;
                     }
                     Cmd::Resolve { feature, take } => {
                         resolve_pending(&app, &db, &feature, take);
@@ -2321,21 +2324,26 @@ fn serve_audio(
             finish_audio_request(&live, id, false);
             return;
         }
-        let mut opened = None;
-        let mut reason = if pending_cover { "cover.pending" } else { "file.missing" };
-        for (_, path) in &paths {
-            match File::open(path).and_then(|file| file.metadata().map(|meta| (file, meta.len()))) {
-                Ok(found) => {
-                    opened = Some(found);
-                    break;
+        // File work runs on the blocking pool so a slow disk does not stall the network thread.
+        let opened = tokio::task::spawn_blocking(move || {
+            let mut reason = if pending_cover { "cover.pending" } else { "file.missing" };
+            for (_, path) in &paths {
+                match File::open(path).and_then(|file| file.metadata().map(|meta| (file, meta.len()))) {
+                    Ok(found) => return Ok(found),
+                    Err(_) => reason = "file.unreadable",
                 }
-                Err(_) => reason = "file.unreadable",
             }
-        }
-        let Some((mut file, total)) = opened else {
-            let _ = tx.send(Frame::AudioErr { id, reason: reason.into() });
-            finish_audio_request(&live, id, false);
-            return;
+            Err(reason)
+        })
+        .await
+        .unwrap_or(Err("file.unreadable"));
+        let (mut file, total) = match opened {
+            Ok(found) => found,
+            Err(reason) => {
+                let _ = tx.send(Frame::AudioErr { id, reason: reason.into() });
+                finish_audio_request(&live, id, false);
+                return;
+            }
         };
         let stop = end.unwrap_or(total).min(total);
         // `start == total` only represents a valid full-file request for an
@@ -2364,7 +2372,18 @@ fn serve_audio(
                 break;
             }
             let max = ((stop - offset) as usize).min(buf.len());
-            let n = match file.read(&mut buf[..max]) {
+            let read = tokio::task::spawn_blocking(move || {
+                let result = file.read(&mut buf[..max]);
+                (file, buf, result)
+            })
+            .await;
+            let Ok((returned_file, returned_buf, result)) = read else {
+                let _ = tx.send(Frame::AudioErr { id, reason: "file.unreadable".into() });
+                break;
+            };
+            file = returned_file;
+            buf = returned_buf;
+            let n = match result {
                 Ok(n) => n,
                 Err(_) => {
                     let _ = tx.send(Frame::AudioErr { id, reason: "file.unreadable".into() });
@@ -2429,7 +2448,21 @@ fn apply_plain(
             if !data_sync_open(&guard) || !guard.setting_bool("historySync").unwrap_or(false) {
                 return;
             }
-            let entries = value.get("entries").and_then(|item| item.as_array()).cloned().unwrap_or_default();
+            // Long histories arrive in parts, like snapshots. Older senders send one message without parts.
+            let part = value.get("part").and_then(|item| item.as_u64()).unwrap_or(0) as usize;
+            let part_count = value.get("parts").and_then(|item| item.as_u64()).unwrap_or(1) as usize;
+            let piece = value.get("entries").cloned().unwrap_or(json!([]));
+            let entries = if part_count <= 1 {
+                piece
+            } else {
+                let Some(done) = live.inner.lock().ok().and_then(|mut state| {
+                    accept_snapshot_part(&mut state.pending_snapshots, device_id, HISTORY_PARTS_KEY, part, part_count, piece)
+                }) else {
+                    return;
+                };
+                done
+            };
+            let entries = entries.as_array().cloned().unwrap_or_default();
             let parsed = entries.iter().filter_map(|item| {
                 let content_id = item.get("contentId")?.as_str()?.to_string();
                 let at = chrono::DateTime::parse_from_rfc3339(item.get("at")?.as_str()?).ok()?;
@@ -2441,6 +2474,9 @@ fn apply_plain(
         }
         "sync-denied" => {
             let feature = value.get("feature").and_then(|item| item.as_str()).unwrap_or("");
+            if let Ok(mut state) = live.inner.lock() {
+                take_sync_request(&mut state, device_id, feature);
+            }
             let name = guard.peers().ok().into_iter().flatten().find(|peer| peer.device_id == device_id).map(|peer| peer.display_name).unwrap_or_default();
             let _ = app.emit("sync-denied", json!({"feature": feature, "name": name}));
         }
@@ -2466,7 +2502,9 @@ fn apply_plain(
                 };
                 done
             };
-            let requested = value.get("requested").and_then(|item| item.as_bool()).unwrap_or(false);
+            // A reply counts as requested only when this computer really asked that device for this feature.
+            let requested = value.get("requested").and_then(|item| item.as_bool()).unwrap_or(false)
+                && live.inner.lock().map(|mut state| take_sync_request(&mut state, device_id, &feature)).unwrap_or(false);
             if manual && !requested && guard.overwrite_mode().unwrap_or_else(|_| "silent".into()) == "ask" {
                 let name = guard.peers().ok().into_iter().flatten().find(|peer| peer.device_id == device_id).map(|peer| peer.display_name).unwrap_or_default();
                 drop(guard);
@@ -2552,6 +2590,10 @@ fn apply_plain(
 }
 
 const SNAPSHOT_PART_BYTES: usize = 16 * 1024;
+/// Most parts one snapshot or history may arrive in (about 4 MiB of rows).
+const SNAPSHOT_MAX_PARTS: usize = 256;
+/// Pending-part key for history messages. It is not a feature name, so it never mixes with a snapshot.
+const HISTORY_PARTS_KEY: &str = "\0history-entries";
 
 pub(crate) struct SnapshotBuild {
     slots: Vec<Option<Value>>,
@@ -2561,6 +2603,30 @@ fn snapshot_part_messages(feature: &str, manual: bool, items: &Value) -> Vec<Val
     let Some(rows) = items.as_array() else {
         return vec![json!({"kind": "snapshot", "feature": feature, "manual": manual, "part": 0, "parts": 1, "items": items})];
     };
+    let groups = part_groups(rows);
+    let count = groups.len();
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, rows)| json!({"kind": "snapshot", "feature": feature, "manual": manual, "part": index, "parts": count, "items": rows}))
+        .collect()
+}
+
+fn history_part_messages(entries: &Value) -> Vec<Value> {
+    let Some(rows) = entries.as_array() else {
+        return vec![json!({"kind": "history", "part": 0, "parts": 1, "entries": entries})];
+    };
+    let groups = part_groups(rows);
+    let count = groups.len();
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, rows)| json!({"kind": "history", "part": index, "parts": count, "entries": rows}))
+        .collect()
+}
+
+/// Splits rows so each part stays near SNAPSHOT_PART_BYTES, well under one frame.
+fn part_groups(rows: &[Value]) -> Vec<Vec<Value>> {
     let mut groups: Vec<Vec<Value>> = Vec::new();
     let mut current = Vec::new();
     let mut size = 2usize;
@@ -2576,15 +2642,14 @@ fn snapshot_part_messages(feature: &str, manual: bool, items: &Value) -> Vec<Val
     if groups.is_empty() || !current.is_empty() {
         groups.push(current);
     }
-    let count = groups.len();
     groups
-        .into_iter()
-        .enumerate()
-        .map(|(index, rows)| json!({"kind": "snapshot", "feature": feature, "manual": manual, "part": index, "parts": count, "items": rows}))
-        .collect()
 }
 
 fn expand_sync_body(body: Value) -> Vec<Value> {
+    if body.get("kind").and_then(|item| item.as_str()) == Some("history") {
+        let entries = body.get("entries").cloned().unwrap_or(json!([]));
+        return history_part_messages(&entries);
+    }
     if body.get("kind").and_then(|item| item.as_str()) != Some("snapshot") {
         return vec![body];
     }
@@ -2616,7 +2681,7 @@ fn accept_snapshot_part(
     part_count: usize,
     items: Value,
 ) -> Option<Value> {
-    if part_count == 0 || part >= part_count || part_count > 64 {
+    if part_count == 0 || part >= part_count || part_count > SNAPSHOT_MAX_PARTS {
         return None;
     }
     let key = format!("{device_id}\0{feature}");
@@ -2642,11 +2707,25 @@ fn accept_snapshot_part(
     Some(json!(merged))
 }
 
+const SYNC_REQUEST_WINDOW: Duration = Duration::from_secs(120);
+
+fn sync_request_key(device_id: &str, feature: &str) -> String {
+    format!("{device_id}\0{feature}")
+}
+
+/// Uses up the matching request. An expired or unknown request does not count.
+fn take_sync_request(state: &mut LiveInner, device_id: &str, feature: &str) -> bool {
+    let now = Instant::now();
+    state.sync_requests.retain(|_, deadline| *deadline > now);
+    state.sync_requests.remove(&sync_request_key(device_id, feature)).is_some()
+}
+
 async fn request_sync(
     db: &Arc<Mutex<Db>>,
     material: &IdentityMaterial,
     store: &mut SignalStore,
     peers: &HashMap<String, PeerOut>,
+    live: &Live,
     feature: &str,
     device_id: &str,
 ) {
@@ -2663,6 +2742,11 @@ async fn request_sync(
         return;
     }
     eprintln!("sync {feature}: requesting a copy from {}", short_id(device_id));
+    if let Ok(mut state) = live.inner.lock() {
+        let now = Instant::now();
+        state.sync_requests.retain(|_, deadline| *deadline > now);
+        state.sync_requests.insert(sync_request_key(device_id, feature), now + SYNC_REQUEST_WINDOW);
+    }
     send_private_signed(material, store, peers, device_id, &json!({"kind": "sync-request", "feature": feature})).await;
 }
 
@@ -2744,7 +2828,9 @@ async fn reply_history_request(
         return true;
     }
     let Some(body) = db.lock().ok().and_then(|guard| history_message(&guard)) else { return true };
-    send_private_signed(material, store, peers, device_id, &body).await;
+    for part in expand_sync_body(body) {
+        send_private_signed(material, store, peers, device_id, &part).await;
+    }
     true
 }
 
@@ -2786,7 +2872,7 @@ async fn tick_history_startup(
     }
     if send {
         if let Some(body) = db.lock().ok().and_then(|guard| history_message(&guard)) {
-            deliver_sync(material, store, peers, vec![body]).await;
+            deliver_sync(material, store, peers, expand_sync_body(body)).await;
         }
     }
 }
@@ -2814,7 +2900,7 @@ async fn send_sync(
 ) {
     if feature == "history" {
         let Some(body) = db.lock().ok().and_then(|guard| history_message(&guard)) else { return };
-        deliver_sync(material, store, peers, vec![body]).await;
+        deliver_sync(material, store, peers, expand_sync_body(body)).await;
         return;
     }
     let bodies = {
@@ -3297,11 +3383,14 @@ fn accept_holdings_part(
     Some(done)
 }
 
-/// An oversized frame is skipped. A real write error ends the connection.
+/// An oversized frame is skipped and logged. A real write error ends the connection.
 async fn write_or_stop(writer: &mut (impl tokio::io::AsyncWriteExt + Unpin), frame: &Frame) -> bool {
     match frames::write_frame(writer, frame).await {
         Ok(()) => false,
-        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => false,
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+            eprintln!("frame not sent: {err}");
+            false
+        }
         Err(_) => true,
     }
 }
@@ -3531,14 +3620,15 @@ async fn start_download(
                 attempt = Some(next);
             }
         }
+        let size = bytes.len() as u64;
         let finish = |state: &str, detail: &str| {
             store_download(&live, DownloadStatus {
                 content_id: content_id.clone(),
                 state: state.into(),
                 detail: detail.into(),
                 title: title.clone(),
-                received: bytes.len() as u64,
-                total: bytes.len() as u64,
+                received: size,
+                total: size,
             });
         };
         let remember = |path: &str, saved_ok: bool| -> Option<Value> {
@@ -3552,23 +3642,38 @@ async fn start_download(
             return;
         }
         let directory = PathBuf::from(&folder);
-        let _ = std::fs::create_dir_all(&directory);
         let name = download_name(&title, &codec, &content_id);
-        let temp = directory.join(format!(".tunepeerly-download-{content_id}.part"));
-        let final_path = unique_path(&directory, &name);
-        let saved = std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, &final_path));
-        let (history, saved_ok) = if saved.is_err() {
-            let _ = std::fs::remove_file(&temp);
-            finish("failed", &folder);
-            (remember(&folder, false), false)
-        } else {
-            if crate::scan::import_path(&db, &directory, "directory").is_ok() {
+        // Writing the file and reading its tags run on the blocking pool, not the network thread.
+        // Only the new file is imported; the rest of the folder is not rescanned.
+        let saved = {
+            let directory = directory.clone();
+            let temp = directory.join(format!(".tunepeerly-download-{content_id}.part"));
+            let db = db.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = std::fs::create_dir_all(&directory);
+                let final_path = unique_path(&directory, &name);
+                if std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, &final_path)).is_err() {
+                    let _ = std::fs::remove_file(&temp);
+                    return None;
+                }
+                let imported = crate::scan::import_downloaded_file(&db, &directory, &final_path).is_ok();
+                Some((final_path, imported))
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+        let (history, saved_ok) = if let Some((final_path, imported)) = saved {
+            if imported {
                 use tauri::Manager;
                 let _ = app.asset_protocol_scope().allow_directory(&directory, true);
             }
             let path = final_path.to_string_lossy().to_string();
             finish("saved", &path);
             (remember(&path, true), true)
+        } else {
+            finish("failed", &folder);
+            (remember(&folder, false), false)
         };
         publish_download(&app, &live, history, true);
         if saved_ok {
