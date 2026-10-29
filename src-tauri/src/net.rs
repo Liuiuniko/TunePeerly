@@ -110,7 +110,6 @@ pub struct LiveInner {
     pub offer: Option<PairingOffer>,
     pub manual: Option<String>,
     pub failures: HashMap<String, String>,
-    pub addresses: HashMap<String, String>,
     pub playing: bool,
     pub current_local: Option<String>,
     pub buffer_enough: bool,
@@ -126,6 +125,9 @@ pub struct LiveInner {
     pub pending_snapshots: HashMap<String, SnapshotBuild>,
     /// Paired devices this computer disconnected on purpose. Automatic redial waits until Connect.
     pub paused: HashSet<String>,
+    /// Paired devices that disconnected this computer on purpose (they sent `Frame::Hold`).
+    /// They are not dialed again until they connect back or the user presses Connect here.
+    pub held: HashSet<String>,
     pub overwrite_waiting: VecDeque<OverwriteAsk>,
     pub overwrite_shown: Vec<OverwriteAsk>,
     pub overwrite_next: u64,
@@ -155,8 +157,6 @@ pub enum Cmd {
     Publish,
     AutoSync(String),
     Pair { device_id: String, host: Option<String> },
-    /// Connect by typed address. Without a port, the other computer is asked which port it listens on.
-    Manual { host: String, port: Option<u16> },
     Confirm { device_id: String, trust: String },
     Reject(String),
     Block(String),
@@ -325,6 +325,7 @@ async fn run(
                     Cmd::Pair { device_id, host } => {
                         if let Ok(mut guard) = live.inner.lock() {
                             guard.paused.remove(&device_id);
+                            guard.held.remove(&device_id);
                             guard.failures.remove(&device_id);
                         }
                         pending.insert(device_id.clone());
@@ -338,33 +339,6 @@ async fn run(
                         } else {
                             let _ = event_tx.send(NetEvent::DialFailed { device_id: Some(device_id), target: None });
                         }
-                    }
-                    Cmd::Manual { host, port } => {
-                        let valid = host.parse::<Ipv4Addr>().is_ok() && port != Some(0);
-                        let allowed = db.lock().map(|guard| {
-                            let (incognito, _, sync, audio) = switches(&guard);
-                            !incognito && (sync || audio)
-                        }).unwrap_or(false);
-                        if !valid || !allowed {
-                            set_manual(&live, "failed");
-                            publish(&app, &db, &live, &peers);
-                            continue;
-                        }
-                        set_manual(&live, "dialing");
-                        publish(&app, &db, &live, &peers);
-                        if let Some(port) = port {
-                            pending.insert(format!("manual:{host}:{port}"));
-                            dial_peer(&db, &material, &provider, &event_tx, vec![host], port, None, &material.device_id).await;
-                            continue;
-                        }
-                        // Only an IP was typed: ask that computer's discovery service for its port, off the network loop.
-                        let name = db.lock().ok().and_then(|guard| guard.setting_string("displayName").ok()).unwrap_or_default();
-                        let (events, self_id, listen_port) = (event_tx.clone(), material.device_id.clone(), actual_port);
-                        tokio::task::spawn_blocking(move || {
-                            let ip = host.parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::UNSPECIFIED);
-                            let found = probe_port(ip, DISCOVERY_PORT, &self_id, &name, listen_port, &lan_ipv4(), PROBE_WAIT);
-                            let _ = events.send(NetEvent::ManualResolved { host, port: found });
-                        });
                     }
                     Cmd::Confirm { device_id, trust } => {
                         if confirm_peer(&db, &material, &live, &mut peers, &device_id, &trust) {
@@ -511,6 +485,10 @@ async fn run(
                         if let Ok(mut guard) = live.inner.lock() {
                             guard.paused.insert(device_id.clone());
                         }
+                        // Queued before the writer is dropped, so it still goes out; the other side stops dialing back.
+                        if let Some(peer) = peers.get(&device_id) {
+                            let _ = peer.tx.send(Frame::Hold);
+                        }
                         peers.remove(&device_id);
                         ready_sessions.remove(&device_id);
                         pending_holdings.remove(&device_id);
@@ -535,53 +513,26 @@ async fn run(
                     NetEvent::Connected { device_id, conn, target, dialed_by, path, writer, audio, identity_public, cert_der, name, incoming } => {
                         if let Ok(mut guard) = live.inner.lock() {
                             guard.failures.remove(&device_id);
-                            if guard.manual.as_deref() == Some("dialing") {
-                                guard.manual = Some("connected".into());
-                            }
+                            guard.held.remove(&device_id);
                         }
                         if let Some(target) = &target {
-                            if let Ok(mut guard) = live.inner.lock() {
-                                guard.addresses.insert(target.clone(), device_id.clone());
-                            }
+                            eprintln!("connected to {} at {target}", short_id(&device_id));
                         }
                         let before = peers.get(&device_id).map(|peer| peer.conn);
-                        // Only the connection to the typed address counts as the manual request, and only once.
-                        let manual = target.as_ref().is_some_and(|target| pending.remove(&format!("manual:{target}")));
-                        if let Some(target) = target.as_ref().filter(|_| manual) {
-                            pending.remove(&format!("guess:{target}"));
-                            // Remember the address that worked, with the port it really used, for reconnects.
-                            if let Some((host, port)) = target.rsplit_once(':').and_then(|(host, port)| Some((host, port.parse::<u16>().ok()?))) {
-                                remember_address(&db, host, port);
-                            }
-                        }
-                        adopt_connection(&db, &material, &live, &mut peers, &pending, manual, &app, device_id.clone(), conn, dialed_by, incoming, path, writer, audio, identity_public, cert_der, name);
+                        adopt_connection(&db, &material, &live, &mut peers, &pending, &app, device_id.clone(), conn, dialed_by, incoming, path, writer, audio, identity_public, cert_der, name);
                         if before != Some(conn) && peers.get(&device_id).is_some_and(|peer| peer.confirmed && peer.conn == conn) {
                             ready_sessions.remove(&device_id);
                             send_bundle(&db, &mut store, &peers, &device_id).await;
                         }
                         publish(&app, &db, &live, &peers);
                     }
-                    NetEvent::ManualResolved { host, port } => {
-                        // Nobody answered the probe: try the default port, and say "not found" if that fails too.
-                        let target_port = port.unwrap_or(DEFAULT_LISTEN_PORT);
-                        if port.is_none() {
-                            pending.insert(format!("guess:{host}:{target_port}"));
-                        }
-                        pending.insert(format!("manual:{host}:{target_port}"));
-                        dial_peer(&db, &material, &provider, &event_tx, vec![host], target_port, None, &material.device_id).await;
-                    }
                     NetEvent::DialFailed { device_id, target } => {
-                        let mut guessed = false;
                         if let Some(target) = &target {
-                            pending.remove(&format!("manual:{target}"));
-                            guessed = pending.remove(&format!("guess:{target}"));
+                            eprintln!("could not connect to {target}");
                         }
                         if let Ok(mut guard) = live.inner.lock() {
                             if let Some(device_id) = device_id {
                                 guard.failures.insert(device_id, "failed".into());
-                            }
-                            if guard.manual.as_deref() == Some("dialing") && target.is_some() {
-                                guard.manual = Some(if guessed { "notFound" } else { "failed" }.into());
                             }
                         }
                         publish(&app, &db, &live, &peers);
@@ -593,6 +544,13 @@ async fn run(
                                 send_bundle(&db, &mut store, &peers, &device_id).await;
                             }
                             publish(&app, &db, &live, &peers);
+                        } else if matches!(frame, Frame::Hold) {
+                            // Arrives before the close, so the redial that follows the close already skips it.
+                            if peers.contains_key(&device_id)
+                                && let Ok(mut guard) = live.inner.lock()
+                            {
+                                guard.held.insert(device_id.clone());
+                            }
                         } else {
                             handle_frame(&app, &db, &material, &mut store, &peers, &live, &bus, &mut ready_sessions, &mut pending_holdings, &mut published_holdings, &device_id, frame).await;
                             let wanted: Vec<String> = live
@@ -636,7 +594,9 @@ async fn run(
                         publish(&app, &db, &live, &peers);
                         // Try the LAN again right away; the nearby list does not change when a connection drops.
                         dial_known(&db, &material, &provider, &event_tx, &live, &peers).await;
-                        maybe_relay_fallback(&db, &material, &provider, &event_tx, &device_id).await;
+                        if !live.inner.lock().is_ok_and(|guard| guard.on_hold().contains(&device_id)) {
+                            maybe_relay_fallback(&db, &material, &provider, &event_tx, &device_id).await;
+                        }
                     }
                     NetEvent::Invitation(invitation) => {
                         join_invited(&db, &material, &provider, &event_tx, invitation).await;
@@ -651,12 +611,15 @@ async fn run(
                 let open = db.lock().map(|guard| network_open(&guard)).unwrap_or(false);
                 if open {
                     dial_known(&db, &material, &provider, &event_tx, &live, &peers).await;
-                    let offline: Vec<String> = {
+                    let saved: Vec<String> = {
                         let Ok(guard) = db.lock() else { continue };
                         guard.peers().unwrap_or_default().into_iter().filter(|peer| {
-                            peer.trust != "verify" && !guard.is_blocked(&peer.device_id).unwrap_or(false) && !peers.contains_key(&peer.device_id)
+                            peer.trust != "verify" && !guard.is_blocked(&peer.device_id).unwrap_or(false)
                         }).map(|peer| peer.device_id).collect()
                     };
+                    // The relay is not asked for a device the user disconnected either.
+                    let paused = live.inner.lock().map(|guard| guard.on_hold()).unwrap_or_default();
+                    let offline = redial_ids(saved, |id| peers.contains_key(id), &paused);
                     for device_id in offline {
                         maybe_relay_fallback(&db, &material, &provider, &event_tx, &device_id).await;
                     }
@@ -705,8 +668,6 @@ enum NetEvent {
     Frame { device_id: String, frame: Frame },
     Closed { device_id: String, conn: u64 },
     DialFailed { device_id: Option<String>, target: Option<String> },
-    /// The port probe for a typed IP finished; `None` means nobody answered.
-    ManualResolved { host: String, port: Option<u16> },
     Invitation(relay::Invitation),
     RelayState(String),
 }
@@ -722,21 +683,8 @@ fn set_manual(live: &Live, state: &str) {
     }
 }
 
-fn remember_address(db: &Arc<Mutex<Db>>, host: &str, port: u16) {
-    let Ok(guard) = db.lock() else { return };
-    let mut list = guard.setting_json("manualAddresses").unwrap_or(json!([]));
-    let entry = format!("{host}:{port}");
-    if let Some(items) = list.as_array_mut() {
-        items.retain(|item| item.as_str() != Some(entry.as_str()));
-        items.insert(0, json!(entry));
-        items.truncate(8);
-    } else {
-        list = json!([entry]);
-    }
-    let _ = guard.set_device_setting("manualAddresses", list);
-}
 
-/// Paired devices that are not connected get dialed at their discovered address, then at saved manual addresses.
+/// Paired devices that are not connected get dialed at the address Nearby discovery found for them.
 async fn dial_known(
     db: &Arc<Mutex<Db>>,
     material: &IdentityMaterial,
@@ -745,7 +693,7 @@ async fn dial_known(
     live: &Live,
     peers: &HashMap<String, PeerOut>,
 ) {
-    let (saved, manual, allowed) = {
+    let (saved, allowed) = {
         let Ok(guard) = db.lock() else { return };
         let (incognito, _, sync, audio) = switches(&guard);
         let saved: Vec<String> = guard
@@ -755,29 +703,17 @@ async fn dial_known(
             .filter(|peer| peer.trust != "verify" && !guard.is_blocked(&peer.device_id).unwrap_or(false))
             .map(|peer| peer.device_id)
             .collect();
-        let manual: Vec<String> = guard
-            .setting_json("manualAddresses")
-            .ok()
-            .and_then(|value| value.as_array().cloned())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|value| value.as_str().map(str::to_string))
-            .collect();
-        (saved, manual, !incognito && (sync || audio))
+        (saved, !incognito && (sync || audio))
     };
     if !allowed {
         return;
     }
-    let paused = live.inner.lock().map(|guard| guard.paused.clone()).unwrap_or_default();
-    let missing: Vec<String> = saved.into_iter().filter(|id| !peers.contains_key(id) && !paused.contains(id)).collect();
+    let paused = live.inner.lock().map(|guard| guard.on_hold()).unwrap_or_default();
+    let missing = redial_ids(saved, |id| peers.contains_key(id), &paused);
     if missing.is_empty() {
         return;
     }
-    let (nearby, addresses) = live
-        .inner
-        .lock()
-        .map(|guard| (guard.nearby.clone(), guard.addresses.clone()))
-        .unwrap_or_default();
+    let nearby = live.inner.lock().map(|guard| guard.nearby.clone()).unwrap_or_default();
     for device_id in &missing {
         if let Some(target) = nearby.iter().find(|item| &item.device_id == device_id) {
             if !dial_gate(device_id) {
@@ -785,17 +721,6 @@ async fn dial_known(
             }
             dial_peer(db, material, provider, events, target.hosts.clone(), target.port, Some(device_id.clone()), &material.device_id).await;
         }
-    }
-    for address in manual {
-        let Some((host, port)) = address.rsplit_once(':') else { continue };
-        let Ok(port) = port.parse::<u16>() else { continue };
-        if nearby.iter().any(|item| item.hosts.iter().any(|known| known == host) && item.port == port) {
-            continue;
-        }
-        if addresses.get(&address).is_some_and(|id| peers.contains_key(id) || !missing.contains(id)) {
-            continue;
-        }
-        dial_peer(db, material, provider, events, vec![host.to_string()], port, None, &material.device_id).await;
     }
 }
 
@@ -842,14 +767,14 @@ async fn restart_listener(
     let ((incognito, discovery, sync, audio), port) = {
         let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
         let switches = switches(&guard);
-        let port = listen_port_setting(guard.setting_i64("listenPort").unwrap_or(0));
+        let port = guard.setting_i64("listenPort").unwrap_or(0).clamp(0, u16::MAX as i64) as u16;
         (switches, port)
     };
     let wanted = !incognito && (discovery || sync || audio);
     // Keep a healthy listener so the announced port stays valid across settings changes.
     if wanted
         && *actual_port != 0
-        && port == *actual_port
+        && (port == 0 || port == *actual_port)
         && listener.as_ref().is_some_and(|task| !task.is_finished())
     {
         return;
@@ -868,13 +793,13 @@ async fn restart_listener(
         return;
     }
     let mut fell_back = false;
-    // A busy port falls back to a free one for this run only; typing just the IP still finds it through the probe.
     let bind = match TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await {
         Ok(tcp) => Ok(tcp),
-        Err(_) => {
+        Err(_) if port != 0 => {
             fell_back = true;
             TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await
         }
+        Err(err) => Err(err),
     };
     let Ok(tcp) = bind else {
         *actual_port = 0;
@@ -885,6 +810,11 @@ async fn restart_listener(
         return;
     };
     *actual_port = tcp.local_addr().map(|addr| addr.port()).unwrap_or(0);
+    if port == 0 && *actual_port != 0 {
+        if let Ok(guard) = db.lock() {
+            let _ = guard.set_device_setting("listenPort", json!(*actual_port));
+        }
+    }
     if let Ok(mut live) = live.inner.lock() {
         live.listen_port = *actual_port;
         live.port_fallback = (fell_back && *actual_port != 0 && *actual_port != port).then_some(port);
@@ -1113,7 +1043,6 @@ fn adopt_connection(
     live: &Live,
     peers: &mut HashMap<String, PeerOut>,
     pending: &HashSet<String>,
-    manual: bool,
     app: &AppHandle,
     device_id: String,
     conn: u64,
@@ -1133,10 +1062,14 @@ fn adopt_connection(
         guard.peers().ok().into_iter().flatten().find(|peer| peer.device_id == device_id)
     });
     let blocked = db.lock().ok().is_some_and(|guard| guard.is_blocked(&device_id).unwrap_or(false));
-    if blocked || live.inner.lock().ok().is_some_and(|guard| guard.paused.contains(&device_id)) {
+    if blocked {
         return;
     }
-    let waiting = pending.contains(&device_id) || manual;
+    if live.inner.lock().ok().is_some_and(|guard| guard.paused.contains(&device_id)) {
+        let _ = writer.send(Frame::Hold);
+        return;
+    }
+    let waiting = pending.contains(&device_id);
     // First contact is only accepted on a connection the other device opened, or one we dialed on purpose.
     if known.is_none() && !incoming && !waiting {
         return;
@@ -1470,6 +1403,19 @@ fn publish(app: &AppHandle, db: &Arc<Mutex<Db>>, live: &Live, peers: &HashMap<St
     let _ = app.emit("network-updated", json!({}));
 }
 
+/// Saved devices to dial again: not connected now and not held off by a manual Disconnect.
+/// A manual Disconnect holds until the user presses Connect (or the app restarts).
+fn redial_ids(saved: Vec<String>, connected: impl Fn(&str) -> bool, paused: &HashSet<String>) -> Vec<String> {
+    saved.into_iter().filter(|id| !connected(id) && !paused.contains(id)).collect()
+}
+
+impl LiveInner {
+    /// Devices automatic redial leaves alone: disconnected here, or disconnected by the other side.
+    fn on_hold(&self) -> HashSet<String> {
+        self.paused.union(&self.held).cloned().collect()
+    }
+}
+
 fn nearby_of(live: &Live, device_id: &str) -> Option<Nearby> {
     live.inner.lock().ok()?.nearby.iter().find(|item| item.device_id == device_id).cloned()
 }
@@ -1513,53 +1459,6 @@ async fn restart_discovery(
 }
 
 const DISCOVERY_PORT: u16 = 41220;
-/// TCP port every computer listens on unless the user picks another one in Settings. Typing only an IP
-/// connects here when the other computer does not answer the discovery probe (for example, discovery is off).
-pub const DEFAULT_LISTEN_PORT: u16 = 41220;
-/// How long a typed IP waits for its discovery service to say which TCP port it uses.
-const PROBE_WAIT: Duration = Duration::from_millis(1600);
-
-/// The saved `listenPort` setting, where 0 or an out-of-range value means the default port.
-pub fn listen_port_setting(saved: i64) -> u16 {
-    u16::try_from(saved).ok().filter(|port| *port >= 1024).unwrap_or(DEFAULT_LISTEN_PORT)
-}
-
-/// Asks the discovery service at `ip` which TCP port it listens on, the same way a discovery announce asks
-/// for a reply, but sent straight to that address. Works across subnets and where multicast is dropped.
-fn probe_port(ip: Ipv4Addr, udp_port: u16, self_id: &str, name: &str, listen_port: u16, local: &[Ipv4Addr], wait: Duration) -> Option<u16> {
-    // A probe that claims port 0 is ignored by the other side, so there is nothing to ask without a listener.
-    if ip.is_unspecified() || listen_port == 0 {
-        return None;
-    }
-    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    socket.set_read_timeout(Some(Duration::from_millis(150))).ok()?;
-    let packet = announce_packet(self_id, name, listen_port, true, local);
-    let deadline = Instant::now() + wait;
-    let mut next_send = Instant::now();
-    let mut buf = [0u8; 2048];
-    while Instant::now() < deadline {
-        if Instant::now() >= next_send {
-            let _ = socket.send_to(&packet, (ip, udp_port));
-            // Replies are limited to one per sender every second, so resending sooner only helps a lost packet.
-            next_send += Duration::from_millis(550);
-        }
-        if let Ok((size, src)) = socket.recv_from(&mut buf) {
-            if let Some(port) = probe_reply(&buf[..size], src, ip, self_id) {
-                return Some(port);
-            }
-        }
-    }
-    None
-}
-
-/// The TCP port from a probe reply, accepted only from the probed address and never from this computer.
-fn probe_reply(bytes: &[u8], src: std::net::SocketAddr, ip: Ipv4Addr, self_id: &str) -> Option<u16> {
-    if src.ip() != std::net::IpAddr::V4(ip) {
-        return None;
-    }
-    let message: Announce = serde_json::from_slice(bytes).ok()?;
-    (message.v == 1 && !message.id.is_empty() && message.id != self_id && message.port != 0).then_some(message.port)
-}
 const DISCOVERY_MAX_DEVICES: usize = 64;
 const DISCOVERY_NETS_REFRESH: Duration = Duration::from_secs(5);
 const DISCOVERY_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 168);
@@ -1665,8 +1564,7 @@ fn run_discovery(
     // Reading the adapters is slow on Windows, so the list is refreshed every few seconds, not per packet.
     let mut nets = lan_nets();
     let mut nets_read = Instant::now();
-    // Keyed by address and port: a probe from a short-lived socket must not be muted by that computer's own announces.
-    let mut replied: HashMap<std::net::SocketAddr, Instant> = HashMap::new();
+    let mut replied: HashMap<std::net::IpAddr, Instant> = HashMap::new();
     loop {
         if stop.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
             break;
@@ -1694,7 +1592,7 @@ fn run_discovery(
                     let reply = peer.announce
                         && src.as_socket().is_some_and(|addr| {
                             replied.retain(|_, at| now.duration_since(*at) < Duration::from_secs(1));
-                            replied.len() < DISCOVERY_MAX_DEVICES && replied.insert(addr, now).is_none()
+                            replied.len() < DISCOVERY_MAX_DEVICES && replied.insert(addr.ip(), now).is_none()
                         });
                     let entry = found.entry(peer.id.clone()).or_insert_with(|| Heard {
                         name: String::new(),
@@ -2416,7 +2314,7 @@ async fn handle_frame(
         return;
     }
     match frame {
-        Frame::Keepalive | Frame::PairAccept => {}
+        Frame::Keepalive | Frame::PairAccept | Frame::Hold => {}
         Frame::Bundle(bytes) => {
             if smaller_device(&material.device_id, device_id).is_lt() {
                 if let Ok(bundle) = decode_bundle(&bytes) {
@@ -4275,60 +4173,25 @@ pub fn choose_download_source(sources: &[PlaySource], failed: Option<&PlaySource
 }
 
 #[cfg(test)]
-mod address_tests {
-    use super::{announce_packet, listen_port_setting, probe_port, probe_reply, DEFAULT_LISTEN_PORT};
-    use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-    use std::time::{Duration, Instant};
+mod disconnect_tests {
+    use super::{redial_ids, LiveInner};
+    use std::collections::HashSet;
 
     #[test]
-    fn unset_or_invalid_listen_ports_use_the_default() {
-        assert_eq!(listen_port_setting(0), DEFAULT_LISTEN_PORT);
-        assert_eq!(listen_port_setting(-5), DEFAULT_LISTEN_PORT);
-        assert_eq!(listen_port_setting(80), DEFAULT_LISTEN_PORT);
-        assert_eq!(listen_port_setting(70000), DEFAULT_LISTEN_PORT);
-        assert_eq!(listen_port_setting(52000), 52000);
+    fn a_hold_from_either_side_stops_automatic_redial() {
+        let mut live = LiveInner::default();
+        live.paused.insert("we-disconnected".into());
+        live.held.insert("they-disconnected".into());
+        let saved = vec!["we-disconnected".to_string(), "they-disconnected".to_string(), "offline".to_string()];
+        assert_eq!(redial_ids(saved, |_| false, &live.on_hold()), vec!["offline".to_string()]);
     }
 
     #[test]
-    fn probe_replies_count_only_from_the_probed_address() {
-        let ip = Ipv4Addr::new(192, 168, 1, 20);
-        let reply = announce_packet("peer-a", "A", 50123, false, &[]);
-        let from = |text: &str| text.parse::<SocketAddr>().unwrap();
-        assert_eq!(probe_reply(&reply, from("192.168.1.20:41220"), ip, "me"), Some(50123));
-        assert_eq!(probe_reply(&reply, from("192.168.1.21:41220"), ip, "me"), None);
-        // This computer's own packet, junk, and a reply without a port are not answers.
-        assert_eq!(probe_reply(&announce_packet("me", "Me", 50123, false, &[]), from("192.168.1.20:41220"), ip, "me"), None);
-        assert_eq!(probe_reply(b"not json", from("192.168.1.20:41220"), ip, "me"), None);
-        assert_eq!(probe_reply(&announce_packet("peer-a", "A", 0, false, &[]), from("192.168.1.20:41220"), ip, "me"), None);
-    }
-
-    #[test]
-    fn a_probe_learns_the_port_from_the_reply() {
-        let responder = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let udp_port = responder.local_addr().unwrap().port();
-        let answer = std::thread::spawn(move || {
-            let mut buf = [0u8; 2048];
-            let (size, src) = responder.recv_from(&mut buf).unwrap();
-            let asked: serde_json::Value = serde_json::from_slice(&buf[..size]).unwrap();
-            assert_eq!(asked["announce"], true);
-            assert_eq!(asked["id"], "me");
-            assert_eq!(asked["port"], 41000);
-            responder.send_to(&announce_packet("peer-a", "A", 50123, false, &[]), src).unwrap();
-        });
-        let found = probe_port(Ipv4Addr::LOCALHOST, udp_port, "me", "Me", 41000, &[], Duration::from_secs(3));
-        answer.join().unwrap();
-        assert_eq!(found, Some(50123));
-    }
-
-    #[test]
-    fn a_probe_without_an_answer_gives_up_in_time() {
-        // Bound but silent, so nothing answers.
-        let silent = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let started = Instant::now();
-        let found = probe_port(Ipv4Addr::LOCALHOST, silent.local_addr().unwrap().port(), "me", "Me", 41000, &[], Duration::from_millis(400));
-        assert_eq!(found, None);
-        assert!(started.elapsed() < Duration::from_secs(2));
-        // No listener of our own means nothing to ask.
-        assert_eq!(probe_port(Ipv4Addr::LOCALHOST, 9, "me", "Me", 0, &[], Duration::from_millis(400)), None);
+    fn a_manually_disconnected_device_is_not_dialed_again() {
+        let saved = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let paused: HashSet<String> = ["b".to_string()].into_iter().collect();
+        assert_eq!(redial_ids(saved.clone(), |id| id == "a", &paused), vec!["c".to_string()]);
+        // After Connect the hold is lifted and the device is dialed again.
+        assert_eq!(redial_ids(saved, |id| id == "a", &HashSet::new()), vec!["b".to_string(), "c".to_string()]);
     }
 }

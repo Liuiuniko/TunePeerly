@@ -1478,7 +1478,6 @@ fn device_defaults() -> Vec<(&'static str, Value)> {
         ("displayName", json!("")),
         ("holdingsRevision", json!(0)),
         ("pendingSnapshots", json!({})),
-        ("manualAddresses", json!([])),
         ("closeAction", json!("")),
         ("miniTray", json!(true)),
         ("silenceSeconds", json!(60)),

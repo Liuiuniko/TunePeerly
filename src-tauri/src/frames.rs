@@ -25,6 +25,9 @@ pub enum Frame {
     AudioHead { id: u64, total: u64 },
     /// The side that was asked to pair has accepted. Empty payload.
     PairAccept,
+    /// The sender disconnected this device on purpose, so do not dial it again until it comes back
+    /// or the user presses Connect. Empty payload. Older versions read it as a keepalive.
+    Hold,
 }
 
 impl Frame {
@@ -61,6 +64,7 @@ impl Frame {
                 (8, payload)
             }
             Self::PairAccept => (9, Vec::new()),
+            Self::Hold => (10, Vec::new()),
         };
         if payload.len() > MAX_PAYLOAD {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
@@ -131,6 +135,7 @@ impl Frame {
                 total: u64::from_be_bytes(payload[8..16].try_into().unwrap()),
             }),
             9 => Ok(Self::PairAccept),
+            10 => Ok(Self::Hold),
             // A frame kind from a newer version: skip it instead of dropping the whole connection.
             _ => Ok(Self::Keepalive),
         }
@@ -167,5 +172,12 @@ mod tests {
         let encoded = Frame::AudioCancel { id: 7 }.encode().unwrap();
         assert!(matches!(Frame::decode(&encoded), Ok(Frame::AudioCancel { id: 7 })));
         assert!(Frame::decode(&[200, 0, 0, 0, 9, 1]).is_err());
+    }
+
+    #[test]
+    fn hold_frame_round_trips() {
+        let encoded = Frame::Hold.encode().unwrap();
+        assert_eq!(encoded, vec![10, 0, 0, 0, 0]);
+        assert!(matches!(Frame::decode(&encoded), Ok(Frame::Hold)));
     }
 }

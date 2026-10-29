@@ -86,7 +86,6 @@ fn bootstrap(state: State<'_, AppState>) -> AppResult<Value> {
         "tracks": catalog::library(&db, &online)?,
         "favoriteIds": db.favorite_content_ids()?,
         "listenPort": live.listen_port,
-        "defaultPort": net::DEFAULT_LISTEN_PORT,
         "portFallback": live.port_fallback,
         "localAddresses": local_addresses,
         "nearby": nearby,
@@ -462,14 +461,6 @@ fn network_command(state: State<'_, AppState>, action: String, payload: Value) -
                 .map(str::to_string)
                 .unwrap_or_else(text),
             host: payload.get("host").and_then(|v| v.as_str()).map(str::to_string),
-        },
-        "manual" => net::Cmd::Manual {
-            host: payload.get("host").and_then(|v| v.as_str()).unwrap_or("").trim().to_string(),
-            // No port means "find it"; an out-of-range number is refused (as 0) instead of wrapping to another port.
-            port: payload
-                .get("port")
-                .filter(|v| !v.is_null())
-                .map(|v| v.as_u64().and_then(|v| u16::try_from(v).ok()).unwrap_or(0)),
         },
         "confirm" => net::Cmd::Confirm {
             device_id: payload.get("deviceId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
