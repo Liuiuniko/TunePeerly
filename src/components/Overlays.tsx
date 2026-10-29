@@ -160,6 +160,8 @@ function DialogHost() {
     try {
       if (dialog.kind === "prompt") await dialog.run(value.trim());
       else await dialog.run();
+    } catch (error) {
+      app.say(error);
     } finally {
       setBusy(false);
       close();
@@ -288,7 +290,8 @@ function DownloadWatcher() {
   const seen = useRef("");
   useEffect(() => {
     if (!download) return;
-    const key = `${download.contentId}:${download.state}:${download.detail}`;
+    // seq changes on every new request, so asking again after a cancel shows the dialog again.
+    const key = `${download.seq ?? 0}:${download.contentId}:${download.state}:${download.detail}`;
     if (key === seen.current) return;
     seen.current = key;
     const track = app.index.get({ contentId: download.contentId });

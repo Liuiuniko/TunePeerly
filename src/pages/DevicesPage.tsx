@@ -25,6 +25,7 @@ export function DevicesPage() {
   const boot = app.boot;
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
+  const [nameEpoch, setNameEpoch] = useState(0);
   if (!boot) return null;
 
   const settings = app.settings;
@@ -52,6 +53,24 @@ export function DevicesPage() {
       danger: true,
       run: () => run("remove", link.deviceId),
     });
+  const block = (link: Link) =>
+    app.setDialog({
+      kind: "confirm",
+      title: t("devices.blockTitle", { name: link.name }),
+      body: t("devices.blockBody"),
+      action: t("devices.block"),
+      danger: true,
+      run: () => run("block", link.deviceId),
+    });
+  const rename = (value: string) => {
+    const name = value.trim().slice(0, 64);
+    // A blank name is not saved; remounting the field puts the current name back.
+    if (!name) {
+      setNameEpoch((epoch) => epoch + 1);
+      return;
+    }
+    void app.setSetting("displayName", name).then(app.scheduleRefresh);
+  };
 
   return (
     <div className="page settings-page devices-page">
@@ -70,7 +89,7 @@ export function DevicesPage() {
       <section className="panel">
         <h2>{t("devices.thisDevice")}</h2>
         <Row title={t("devices.name")} help={t("devices.nameHelp")}>
-          <CommitInput label={t("devices.name")} value={boot.deviceName} width={260} onCommit={(value) => void app.setSetting("displayName", value.trim().slice(0, 64)).then(app.scheduleRefresh)} />
+          <CommitInput key={nameEpoch} label={t("devices.name")} value={boot.deviceName} width={260} onCommit={rename} />
         </Row>
         <Row title={t("devices.status")}>
           <div className="pill-row">
@@ -142,7 +161,7 @@ export function DevicesPage() {
                 <button type="button" className="icon-btn" aria-label={t("devices.remove")} title={t("devices.remove")} onClick={() => remove(link)}>
                   <Icons.trash />
                 </button>
-                <button type="button" className="btn ghost small danger-text" onClick={() => run("block", link.deviceId)}>
+                <button type="button" className="btn ghost small danger-text" onClick={() => block(link)}>
                   {t("devices.block")}
                 </button>
               </li>
