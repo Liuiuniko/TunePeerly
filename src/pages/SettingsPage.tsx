@@ -356,7 +356,7 @@ export function SettingsPage() {
           title={<span className="setting-title-line">{t("settings.lanPort")}<Revise /></span>}
           help={
             <>
-              <div>{t("settings.lanPortHelp", { port: boot.listenPort || "—" })}</div>
+              <div>{t("settings.lanPortHelp", { port: boot.listenPort || "—", default: boot.defaultPort })}</div>
               {boot.portFallback ? <div className="setting-error">{t("settings.portFallback", { saved: boot.portFallback, port: boot.listenPort || "—" })}</div> : null}
             </>
           }
@@ -365,7 +365,7 @@ export function SettingsPage() {
             label={t("settings.lanPort")}
             type="number"
             width={110}
-            value={String(settings.listenPort || "")}
+            value={String(settings.listenPort || boot.defaultPort || "")}
             onCommit={(value) => {
               const port = Number(value);
               if (!Number.isInteger(port) || port < 1024 || port > 65535) {

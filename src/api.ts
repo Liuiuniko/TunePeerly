@@ -105,6 +105,8 @@ export type Bootstrap = {
   tracks: Track[];
   favoriteIds?: string[];
   listenPort: number;
+  /** Port used unless Settings names another; typing only an IP falls back to it. */
+  defaultPort: number;
   portFallback?: number | null;
   localAddresses?: string[];
   nearby: Nearby[];

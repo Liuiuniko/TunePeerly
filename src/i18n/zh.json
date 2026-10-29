@@ -444,10 +444,11 @@
     "noBlocked": "没有拉黑的设备。",
     "blockHelp": "被拉黑的设备无法连接这台电脑。它发来的请求会被直接丢掉，对方只看到连接失败。你可以在这个清单里看到它。",
     "manual": "按地址连接",
-    "manualHelp": "输入另一台电脑设备页上显示的 IPv4 地址和端口。",
+    "manualHelp": "输入另一台电脑设备页上显示的 IPv4 地址。",
     "address": "IPv4 地址",
-    "portLabel": "端口",
+    "badAddress": "请输入 IPv4 地址，例如 192.168.1.20。",
     "connect": "连接",
+    "connectTo": "连接 {{address}}",
     "connecting": "正在连接…",
     "recent": "最近",
     "paste": "用文本配对",
@@ -466,6 +467,7 @@
     "dialing": "正在连接…",
     "connected": "已连接",
     "failed": "连接失败",
+    "notFound": "这个地址上没有声渡响应。请确认它已打开，并在同一个网络里。",
     "badText": "配对文本无效。"
   },
   "relay": {
@@ -640,7 +642,7 @@
     "downloadFolder": "下载文件夹",
     "downloadFolderNone": "未设置，第一次下载时会询问。",
     "lanPort": "局域网端口",
-    "lanPortHelp": "已保存,每次启动都使用它。当前监听 {{port}}。",
+    "lanPortHelp": "默认 {{default}}。当前监听 {{port}}。别的电脑只输入本机 IP 时会自动询问这个端口；如果关闭了附近设备发现，会尝试 {{default}}。",
     "portInvalid": "请输入 1024 到 65535 之间的端口。",
     "relayPortInvalid": "请输入 1 到 65535 之间的端口。",
     "deviceId": "设备标识",
@@ -648,7 +650,7 @@
     "overwriteMode": "他人覆盖本机时",
     "overwriteModeHelp": "对任何已配对设备的“发送”生效。静默覆盖会直接接受,先询问会让你先确认。",
     "portBusy": "该端口已被占用,请换一个。",
-    "portFallback": "端口 {{saved}} 已被占用，当前暂时监听 {{port}}。保存的端口没有改，下次启动还会再试。"
+    "portFallback": "端口 {{saved}} 已被占用，这次运行暂时监听 {{port}}。只要附近设备发现开着，别人只输入本机 IP 仍能找到它。"
   },
   "about": {
     "name": "声渡",

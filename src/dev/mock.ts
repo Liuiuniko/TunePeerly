@@ -235,6 +235,7 @@ function bootstrap(): Bootstrap {
     tracks: orderedLibrary(),
     favoriteIds: orderedLibrary().map((track) => track.contentId).filter((id): id is string => Boolean(id && tracks.find((item) => item.contentId === id)?.favorite)),
     listenPort: params.has("portbusy") ? 22111 : 22000,
+    defaultPort: 22000,
     portFallback: params.has("portbusy") ? 22000 : null,
     localAddresses: ["192.168.1.20", "10.0.0.8"],
     nearby: empty ? [] : [{ deviceId: "dev-living", name: "Living Room", host: "192.168.1.31", hosts: ["192.168.1.31", "10.0.0.31"], port: 22000 }],
@@ -389,8 +390,10 @@ async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (action === "paste") state.manual = String(args.payload).startsWith("DMP1:") ? null : "badText";
       if (action === "manual") {
         state.manual = "dialing";
+        // Only an IP: nobody answers here, so it ends as "not found"; with a port it is a plain failure.
+        const typedPort = (args.payload as { port?: number } | null)?.port;
         setTimeout(() => {
-          state.manual = "failed";
+          state.manual = typedPort ? "failed" : "notFound";
           emit("network-updated");
         }, 1200);
       }

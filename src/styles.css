@@ -3911,7 +3911,8 @@ button.device-name:hover {
   font-weight: 600;
 }
 
-.state-text.failed {
+.state-text.failed,
+.state-text.notFound {
   color: var(--bad);
 }
 
