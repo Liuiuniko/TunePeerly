@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import { useApp } from "../app/model";
 import { coverSrc, Cover } from "./Cover";
-import { ConnectBar, DevicePicker } from "./DevicePicker";
+import { ConnectStrip, DevicePicker, useConnectStrip } from "./DevicePicker";
 import { clockText } from "../lib/format";
 import { displayTitle, trackKey } from "../lib/library";
 import { clock, transport } from "../player/clock";
@@ -28,15 +28,17 @@ export function PlayerBar() {
 
   useMediaSession();
   useDesktopNowPlaying();
-  // The page gets room for the green "Playing on" line.
-  const remoteOn = Boolean(app.remote);
+  // The device list opens from its button and from the "Playing on" strip under the player.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  // The "Playing on" strip takes a row of its own; the page, panels and toasts make room through --player-h.
+  const strip = useConnectStrip();
   useEffect(() => {
-    document.documentElement.classList.toggle("connect-remote", remoteOn);
-    return () => document.documentElement.classList.remove("connect-remote");
-  }, [remoteOn]);
+    document.documentElement.classList.toggle("connect-shown", strip);
+    return () => document.documentElement.classList.remove("connect-shown");
+  }, [strip]);
 
   return (
-    <footer className={`player-bar${app.remote ? " remote" : ""}`}>
+    <footer className={`player-bar${app.remote ? " remote" : ""}${strip ? " linked" : ""}`}>
       <div className="player-left">
         {track ? (
           <>
@@ -97,14 +99,14 @@ export function PlayerBar() {
         <button type="button" className={`icon-btn${app.queueOpen ? " on" : ""}`} aria-label={t("player.queue")} title={t("player.queue")} aria-pressed={app.queueOpen} onClick={() => app.setQueueOpen(!app.queueOpen)}>
           <Icons.queue />
         </button>
-        <DevicePicker />
+        <DevicePicker open={pickerOpen} setOpen={setPickerOpen} />
         <Volume />
         <button type="button" className={`icon-btn notice-btn${app.noticesOpen ? " on" : ""}`} aria-label={t("player.notices")} title={t("player.notices")} aria-pressed={app.noticesOpen} onClick={() => app.setNoticesOpen(!app.noticesOpen)}>
           <Icons.bell />
           {app.unreadNotices > 0 && <span className="notice-badge">{app.unreadNotices > 99 ? "99+" : app.unreadNotices}</span>}
         </button>
       </div>
-      <ConnectBar />
+      <ConnectStrip open={pickerOpen} setOpen={setPickerOpen} />
     </footer>
   );
 }

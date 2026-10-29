@@ -32,15 +32,18 @@ import {
   MAX_PAST,
   MAX_REFS,
   MAX_STATE_QUEUE,
+  acceptsInbound,
   addOverlay,
   commandId,
   contextIdFrom,
   contextKindOf,
   extrapolate,
+  forgetDevice,
   isContentId,
   isFresh,
   isPortableContext,
   nextClaim,
+  pickAction,
   pickActive,
   receiveState,
   safeName,
@@ -147,7 +150,8 @@ function saveClaim(value: number) {
   }
 }
 
-export type ConnectDevice = { deviceId: string; name: string; self: boolean; active: boolean };
+/** A row of the device picker. `detached`: the device plays on its own, outside device control. */
+export type ConnectDevice = { deviceId: string; name: string; self: boolean; active: boolean; detached: boolean };
 export type RemotePlayback = RemoteView & { name: string };
 
 const PAST_LIMIT = 200;
@@ -236,6 +240,10 @@ function useModel() {
   const [remotes, setRemotes] = useState<Record<string, RemoteEntry>>({});
   const [activeId, setActiveId] = useState("");
   const [overlay, setOverlay] = useState<Overlay | null>(null);
+  /** This computer left device control to play on its own. Not saved: every start joins again. */
+  const [detached, setDetached] = useState(false);
+  /** Other devices that said they play on their own, until they report again. */
+  const [detachedPeers, setDetachedPeers] = useState<ReadonlySet<string>>(() => new Set());
   const [downloadFeed, setDownloadFeed] = useState<DownloadFeed | null>(null);
   const [search, setSearch] = useState("");
 
@@ -246,7 +254,13 @@ function useModel() {
   const activeRef = useRef("");
   const overlayRef = useRef(overlay);
   overlayRef.current = overlay;
+  const detachedRef = useRef(false);
+  /** Rejoined with music playing here: it becomes the active one once the others' claims are known. */
+  const claimOnJoinRef = useRef<number | undefined>(undefined);
+  const detachedPeersRef = useRef<ReadonlySet<string>>(detachedPeers);
   const claimRef = useRef(savedClaim());
+  /** The highest claim seen from any device, kept when a device that left is forgotten. */
+  const claimFloorRef = useRef(0);
   /** Ids of the latest commands this computer carried out for other devices. */
   const doneRef = useRef<string[]>([]);
   const pendingRef = useRef(new Map<string, { timer: number; transfer: boolean }>());
@@ -981,7 +995,7 @@ function useModel() {
   const remoteTarget = useCallback((): string | null => {
     const active = activeRef.current;
     const self = selfId();
-    return active && self && active !== self && !incognito() ? active : null;
+    return active && self && active !== self && !incognito() && !detachedRef.current ? active : null;
   }, [incognito, selfId]);
 
   const contextNameOf = useCallback((contextId: string): string => {
@@ -1006,7 +1020,7 @@ function useModel() {
 
   const publishNow = useCallback(() => {
     window.clearTimeout(publishTimer.current);
-    if (incognito() || !selfId()) return;
+    if (incognito() || detachedRef.current || !selfId()) return;
     const state = queueRef.current;
     const track = engine.current ?? indexRef.current.get(state.current) ?? null;
     // Queue positions are counted the same on both sides, so the list stops at the first song without an id.
@@ -1056,7 +1070,7 @@ function useModel() {
   const reevaluateRef = useRef<() => void>(() => {});
 
   const claim = useCallback(() => {
-    claimRef.current = nextClaim(claimRef.current, remotesRef.current);
+    claimRef.current = nextClaim(claimRef.current, remotesRef.current, claimFloorRef.current);
     saveClaim(claimRef.current);
     reevaluateRef.current();
     publishNow();
@@ -1077,7 +1091,7 @@ function useModel() {
       engine.cue(track, position);
       loadLyrics(track);
     }
-    claimRef.current = nextClaim(claimRef.current, remotesRef.current);
+    claimRef.current = nextClaim(claimRef.current, remotesRef.current, claimFloorRef.current);
     saveClaim(claimRef.current);
     toast(t("connect.fallback", { name: deviceName(entry.deviceId) }));
     publishNow();
@@ -1087,7 +1101,7 @@ function useModel() {
     const self = selfId();
     if (!self) return;
     const now = performance.now();
-    const online = incognito() ? new Set<string>() : onlineIds();
+    const online = incognito() || detachedRef.current ? new Set<string>() : onlineIds();
     const next = pickActive(self, claimRef.current, remotesRef.current, online, now);
     const before = activeRef.current || self;
     if (next === before) {
@@ -1106,7 +1120,7 @@ function useModel() {
       return;
     }
     const gone = remotesRef.current[before];
-    if (gone && !incognito() && (!online.has(before) || !isFresh(gone, now))) takeOver(gone, now);
+    if (gone && !incognito() && !detachedRef.current && (!online.has(before) || !isFresh(gone, now))) takeOver(gone, now);
   }, [engine, incognito, onlineIds, selfId, takeOver]);
   reevaluateRef.current = reevaluate;
 
@@ -1125,6 +1139,7 @@ function useModel() {
   };
   const rejoinConnect = useRef<() => void>(() => {});
   rejoinConnect.current = () => {
+    if (detachedRef.current) return;
     if (engine.playing) claim();
     else publishNow();
   };
@@ -1153,7 +1168,11 @@ function useModel() {
 
   /** Moves this computer's playback to another device, which becomes the active one. */
   const transferTo = useCallback((target: string) => {
-    if (target === selfId() || incognito()) return;
+    if (target === selfId() || incognito() || detachedRef.current) return;
+    if (detachedPeersRef.current.has(target)) {
+      setNotice(t("connect.detachedThere"));
+      return;
+    }
     const state = queueRef.current;
     const ids = (items: TrackRef[]) => items.map((item) => indexRef.current.get(item)?.contentId ?? item.contentId).filter(isContentId);
     const currentTrack = indexRef.current.get(state.current);
@@ -1180,16 +1199,95 @@ function useModel() {
     pendingRef.current.set(id, { timer, transfer: true });
   }, [contextNameOf, deviceName, engine, finishPending, incognito, selfId, sendConnect, setNotice, t]);
 
-  /** The device picker: choosing a device moves playback there. */
+  const markDetachedPeers = useCallback((update: (set: Set<string>) => void) => {
+    const next = new Set(detachedPeersRef.current);
+    update(next);
+    if (next.size === detachedPeersRef.current.size && [...next].every((id) => detachedPeersRef.current.has(id))) return;
+    detachedPeersRef.current = next;
+    setDetachedPeers(next);
+  }, []);
+
+  /**
+   * Leaves device control: this computer keeps its own song and queue and plays on its own, and the
+   * others forget it. Used both by a computer that was only a remote and by the active one ("play
+   * only here"); the device that is playing elsewhere keeps playing.
+   */
+  const detach = useCallback(() => {
+    const self = selfId();
+    if (!self || incognito() || detachedRef.current) return;
+    const wasRemote = remoteTarget() !== null;
+    window.clearTimeout(claimOnJoinRef.current);
+    claimOnJoinRef.current = undefined;
+    detachedRef.current = true;
+    setDetached(true);
+    // The backend says "connect-leave" and from now on refuses controls and drops reports.
+    void api.network("connect-mode", { detached: true }).catch(() => {});
+    for (const pending of pendingRef.current.values()) window.clearTimeout(pending.timer);
+    pendingRef.current.clear();
+    setRemoteEntries({});
+    activeRef.current = self;
+    setActiveId(self);
+    setOverlay(null);
+    toast(t(wasRemote ? "connect.detachedRemote" : "connect.detachedSolo"));
+  }, [incognito, remoteTarget, selfId, setRemoteEntries, t, toast]);
+
+  /**
+   * Joins device control again. Music playing here becomes the group's playback when `claimHere`;
+   * otherwise this computer reports itself and follows whichever device is active.
+   */
+  const rejoin = useCallback(async (claimHere: boolean) => {
+    if (!detachedRef.current) return;
+    detachedRef.current = false;
+    setDetached(false);
+    // Waits until the backend lets reports out again, so the first one is not dropped.
+    await api.network("connect-mode", { detached: false }).catch(() => {});
+    publishNow();
+    if (!claimHere || !engine.playing) return;
+    // The claims of the others were forgotten while detached, so this one is taken after their
+    // answers to the report above arrive, or after a moment when nobody answers.
+    window.clearTimeout(claimOnJoinRef.current);
+    claimOnJoinRef.current = window.setTimeout(() => {
+      claimOnJoinRef.current = undefined;
+      if (engine.playing && !detachedRef.current) claim();
+    }, 1500);
+  }, [claim, engine, publishNow]);
+
+  /** The device picker: choosing a device moves playback there, or joins again while detached. */
   const pickDevice = useCallback((target: string) => {
-    const remote = remoteTarget();
-    if (remote) {
-      if (target === remote) return;
-      sendCommand(remote, { op: "transfer", to: target });
-      return;
+    const action = pickAction({
+      self: selfId(),
+      target,
+      active: activeRef.current || selfId(),
+      detached: detachedRef.current,
+      detachedPeers: detachedPeersRef.current,
+      hasTrack: Boolean(queueRef.current.current),
+      playing: engine.playing,
+    });
+    switch (action.kind) {
+      case "unavailable":
+        setNotice(t("connect.detachedThere"));
+        return;
+      case "transfer":
+        transferTo(action.to);
+        return;
+      case "remoteTransfer":
+        sendCommand(action.via, { op: "transfer", to: action.to });
+        return;
+      case "rejoin":
+        void rejoin(action.claim);
+        return;
+      case "rejoinTransfer":
+        void (async () => {
+          detachedRef.current = false;
+          setDetached(false);
+          await api.network("connect-mode", { detached: false }).catch(() => {});
+          transferTo(action.to);
+        })();
+        return;
+      default:
+        return;
     }
-    transferTo(target);
-  }, [remoteTarget, sendCommand, transferTo]);
+  }, [engine, rejoin, selfId, sendCommand, setNotice, t, transferTo]);
 
   const resolveIds = useCallback((ids: string[]) => ids.map((id) => indexRef.current.get(idRef(id))).filter((item): item is Track => Boolean(item)), []);
 
@@ -1289,7 +1387,7 @@ function useModel() {
     const queueIn = body.queue;
     const track = queueIn.current ? indexRef.current.get(idRef(queueIn.current)) : undefined;
     if (queueIn.current && (!track || !track.playable)) return track?.reasonKey ?? "notice.offlineTrack";
-    claimRef.current = nextClaim(claimRef.current, remotesRef.current);
+    claimRef.current = nextClaim(claimRef.current, remotesRef.current, claimFloorRef.current);
     saveClaim(claimRef.current);
     reevaluateRef.current();
     if (track) {
@@ -1314,13 +1412,38 @@ function useModel() {
 
   connectIn.current = (from, kind, raw) => {
     if (incognito() || !raw || typeof raw !== "object" || from === selfId()) return;
+    if (!acceptsInbound(detachedRef.current, kind)) return;
     const body = raw as Record<string, unknown>;
+    if (kind === "connect-leave") {
+      // That device plays on its own now: it is no longer active here and cannot be controlled.
+      markDetachedPeers((set) => set.add(from));
+      if (from in remotesRef.current) {
+        setRemoteEntries(forgetDevice(remotesRef.current, from));
+        if (activeRef.current === from) setOverlay(null);
+        reevaluate();
+      }
+      return;
+    }
     if (kind === "connect-state") {
       const state = body as unknown as ConnectState;
       const now = performance.now();
+      const known = from in remotesRef.current;
+      claimFloorRef.current = Math.max(claimFloorRef.current, Number(state.claim) || 0);
       const entry = receiveState(remotesRef.current[from], from, state, now);
       if (entry === remotesRef.current[from]) return;
+      markDetachedPeers((set) => set.delete(from));
       setRemoteEntries({ ...remotesRef.current, [from]: entry });
+      if (claimOnJoinRef.current !== undefined) {
+        window.clearTimeout(claimOnJoinRef.current);
+        claimOnJoinRef.current = undefined;
+        // Taken before the active device is worked out, so the music playing here is not paused first.
+        if (engine.playing) {
+          claim();
+          return;
+        }
+      }
+      // A device that just joined (or rejoined) learns who is playing without waiting for the next report.
+      if (!known) schedulePublish();
       if (activeRef.current === from && overlayRef.current) setOverlay(settleOverlay(overlayRef.current, state.done ?? [], now));
       reevaluate();
       return;
@@ -1334,6 +1457,11 @@ function useModel() {
         return;
       }
       setOverlay(null);
+      if (ack.reason === "connect.detachedThere") {
+        markDetachedPeers((set) => set.add(from));
+        if (from in remotesRef.current) setRemoteEntries(forgetDevice(remotesRef.current, from));
+        reevaluate();
+      }
       setNotice(t(ack.reason ?? "connect.failed", { defaultValue: t("connect.failed") }));
       return;
     }
@@ -1349,7 +1477,7 @@ function useModel() {
   // Reports: changes go out within a second, and a quiet device repeats itself so it is not taken for gone.
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (incognito() || onlineIds().size === 0) return;
+      if (incognito() || detachedRef.current || onlineIds().size === 0) return;
       const now = performance.now();
       const signature = publishSignature();
       const quiet = now - lastPublish.current.at >= (engine.playing ? HEARTBEAT_PLAYING_MS : HEARTBEAT_PAUSED_MS);
@@ -1359,6 +1487,11 @@ function useModel() {
     return () => window.clearInterval(timer);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine, incognito, onlineIds, publishNow, reevaluate]);
+
+  // Detaching is not saved: a reloaded window makes sure the backend takes part again too.
+  useEffect(() => {
+    void api.network("connect-mode", { detached: false }).catch(() => {});
+  }, []);
 
   // A device that just connected learns at once who is playing; the second report covers a slow handshake.
   const onlineKey = (boot?.links ?? []).filter((link) => link.state === "online").map((link) => link.deviceId).sort().join(",");
@@ -1606,7 +1739,7 @@ function useModel() {
     activity: (playing, track, bufferEnough) => {
       void api.network("activity", { playing, localFileId: track?.localFileId ?? null, bufferEnough }).catch(() => {});
       // Playback that starts here makes this the active device, and every other device pauses.
-      if (playing && !bootRef.current?.settings.incognito && (claimRef.current === 0 || activeRef.current !== selfId())) claim();
+      if (playing && !bootRef.current?.settings.incognito && !detachedRef.current && (claimRef.current === 0 || activeRef.current !== selfId())) claim();
       schedulePublish();
     },
     playable: (track) => {
@@ -1625,7 +1758,7 @@ function useModel() {
 
   const favoriteIds = useMemo(() => new Set(boot?.favoriteIds ?? []), [boot?.favoriteIds]);
   const selfDevice = boot?.deviceId ?? "";
-  const remoteEntry = activeId && activeId !== selfDevice && !settings.incognito ? remotes[activeId] : undefined;
+  const remoteEntry = activeId && activeId !== selfDevice && !settings.incognito && !detached ? remotes[activeId] : undefined;
   const remoteName = remoteEntry ? (boot?.links.find((link) => link.deviceId === remoteEntry.deviceId)?.name || t("connect.otherDevice")) : "";
   const remote: RemotePlayback | null = useMemo(
     () => (remoteEntry ? { ...viewOf(remoteEntry, overlay), name: remoteName } : null),
@@ -1685,14 +1818,15 @@ function useModel() {
 
   const devices: ConnectDevice[] = useMemo(() => {
     const active = remote ? remote.deviceId : selfDevice;
-    const list: ConnectDevice[] = [{ deviceId: selfDevice, name: t("connect.thisComputer"), self: true, active: active === selfDevice }];
+    const list: ConnectDevice[] = [{ deviceId: selfDevice, name: t("connect.thisComputer"), self: true, active: active === selfDevice, detached }];
     if (settings.incognito) return list;
     for (const link of boot?.links ?? []) {
       if (link.state !== "online" || link.deviceId === selfDevice) continue;
-      list.push({ deviceId: link.deviceId, name: link.name || t("connect.otherDevice"), self: false, active: link.deviceId === active });
+      const apart = detachedPeers.has(link.deviceId);
+      list.push({ deviceId: link.deviceId, name: link.name || t("connect.otherDevice"), self: false, active: !detached && !apart && link.deviceId === active, detached: apart });
     }
     return list;
-  }, [boot?.links, remote, selfDevice, settings.incognito, t]);
+  }, [boot?.links, detached, detachedPeers, remote, selfDevice, settings.incognito, t]);
 
   useEffect(() => {
     loadLyrics(shown ?? undefined);
@@ -1728,6 +1862,9 @@ function useModel() {
     devices,
     activeId: remote ? remote.deviceId : selfId(),
     transferTo: pickDevice,
+    detached,
+    detach,
+    rejoin,
     lyrics,
     failure,
     downloadFeed,

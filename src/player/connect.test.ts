@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ACK_TIMEOUT_MS,
+  acceptsInbound,
+  forgetDevice,
+  pickAction,
   STALE_MS,
   addOverlay,
   claimBeats,
@@ -158,4 +161,62 @@ test("a long list is cut to a window that still holds the chosen song", () => {
   assert.equal(cut.items.length, 2000);
   assert.equal(cut.items[cut.index], 4000);
   assert.deepEqual(windowAround([1, 2, 3], 1, 2000), { items: [1, 2, 3], index: 1 });
+});
+
+test("a detached device ignores reports, controls and transfers but reads answers and leaves", () => {
+  for (const kind of ["connect-state", "connect-cmd", "connect-ack", "connect-transfer", "connect-leave"]) {
+    assert.equal(acceptsInbound(false, kind), true, kind);
+  }
+  assert.equal(acceptsInbound(true, "connect-state"), false);
+  assert.equal(acceptsInbound(true, "connect-cmd"), false);
+  assert.equal(acceptsInbound(true, "connect-transfer"), false);
+  assert.equal(acceptsInbound(true, "connect-ack"), true);
+  assert.equal(acceptsInbound(true, "connect-leave"), true);
+  assert.equal(acceptsInbound(false, "position"), false);
+});
+
+test("a device that left is forgotten, so it can no longer be the active one", () => {
+  const now = 1000;
+  const remotes: Record<string, RemoteEntry> = {
+    [B]: entry(B, { claim: 9 }, now),
+    [C]: entry(C, { claim: 4 }, now),
+  };
+  const online = new Set([B, C]);
+  assert.equal(pickActive(A, 2, remotes, online, now), B);
+  const after = forgetDevice(remotes, B);
+  assert.equal(B in after, false);
+  assert.equal(B in remotes, true, "the old record is not changed");
+  assert.equal(pickActive(A, 2, after, online, now), C);
+  assert.equal(pickActive(A, 2, forgetDevice(after, C), online, now), A);
+  assert.equal(forgetDevice(after, "nobody"), after);
+});
+
+test("the device picker while joined moves playback", () => {
+  const base = { self: A, detached: false, detachedPeers: new Set<string>(), hasTrack: true, playing: true };
+  assert.deepEqual(pickAction({ ...base, target: B, active: A }), { kind: "transfer", to: B });
+  assert.deepEqual(pickAction({ ...base, target: A, active: A }), { kind: "none" });
+  assert.deepEqual(pickAction({ ...base, target: C, active: B }), { kind: "remoteTransfer", via: B, to: C });
+  assert.deepEqual(pickAction({ ...base, target: A, active: B }), { kind: "remoteTransfer", via: B, to: A });
+  assert.deepEqual(pickAction({ ...base, target: B, active: B }), { kind: "none" });
+  assert.deepEqual(pickAction({ ...base, target: C, active: A, detachedPeers: new Set([C]) }), { kind: "unavailable" });
+});
+
+test("the device picker while detached rejoins", () => {
+  const base = { self: A, active: A, detached: true, detachedPeers: new Set<string>(), hasTrack: true, playing: false };
+  assert.deepEqual(pickAction({ ...base, target: A }), { kind: "rejoin", claim: false });
+  assert.deepEqual(pickAction({ ...base, target: A, playing: true }), { kind: "rejoin", claim: true });
+  assert.deepEqual(pickAction({ ...base, target: B, playing: true }), { kind: "rejoinTransfer", to: B });
+  assert.deepEqual(pickAction({ ...base, target: B }), { kind: "rejoin", claim: false }, "nothing playing here: just join");
+  assert.deepEqual(pickAction({ ...base, target: B, playing: true, hasTrack: false }), { kind: "rejoin", claim: false });
+  assert.deepEqual(pickAction({ ...base, target: B, detachedPeers: new Set([B]) }), { kind: "unavailable" });
+  assert.deepEqual(pickAction({ ...base, self: "", target: B }), { kind: "none" });
+});
+
+test("a claim stays above devices that left and were forgotten", () => {
+  const remotes: Record<string, RemoteEntry> = { [B]: entry(B, { claim: 9 }) };
+  assert.equal(nextClaim(3, remotes), 10);
+  const forgotten = forgetDevice(remotes, B);
+  assert.equal(nextClaim(3, forgotten), 4, "without the floor the old claim would win again");
+  assert.equal(nextClaim(3, forgotten, 9), 10);
+  assert.equal(nextClaim(12, forgotten, 9), 13);
 });

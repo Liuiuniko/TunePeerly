@@ -6,6 +6,11 @@
 // is active. A device that starts playing takes a new claim, so every other device pauses and
 // shows "Playing on X". Other devices control the active one with `connect-cmd`, and moving
 // playback is a `connect-transfer` that the target answers with `connect-ack`.
+//
+// A device can also leave ("detach") to play on its own: it says `connect-leave`, forgets the
+// others, stops reporting and refuses controls, so it neither pauses for them nor pauses them.
+// Choosing a device in the picker, or "Rejoin", brings it back. Detaching is not saved: every start
+// joins the group again, so a computer never stays cut off without the user seeing why.
 import type { OrderMode, RepeatMode } from "./advance.ts";
 
 export const CONNECT_VERSION = 1;
@@ -133,9 +138,12 @@ export function pickActive(selfId: string, selfClaim: number, remotes: Record<st
   return best;
 }
 
-/** The next claim for this computer: above every claim it has seen. */
-export function nextClaim(selfClaim: number, remotes: Record<string, RemoteEntry>): number {
-  let max = selfClaim;
+/**
+ * The next claim for this computer: above every claim it has seen. `floor` is the highest claim ever
+ * seen, kept after a device that left is forgotten, so its old claim can never win over a new one.
+ */
+export function nextClaim(selfClaim: number, remotes: Record<string, RemoteEntry>, floor = 0): number {
+  let max = Math.max(selfClaim, floor);
   for (const entry of Object.values(remotes)) max = Math.max(max, entry.claim);
   return max + 1;
 }
@@ -253,6 +261,56 @@ export function windowAround<T>(items: T[], index: number, max = MAX_REFS): { it
   if (items.length <= max) return { items, index };
   const start = Math.max(0, Math.min(index - Math.floor(max / 4), items.length - max));
   return { items: items.slice(start, start + max), index: index - start };
+}
+
+/** Whether a message from another device is acted on. A detached device only reads answers and leaves. */
+export function acceptsInbound(detached: boolean, kind: string): boolean {
+  if (!["connect-state", "connect-cmd", "connect-ack", "connect-transfer", "connect-leave"].includes(kind)) return false;
+  return !detached || kind === "connect-ack" || kind === "connect-leave";
+}
+
+/** Everything known about the other devices, without one that left. */
+export function forgetDevice(remotes: Record<string, RemoteEntry>, deviceId: string): Record<string, RemoteEntry> {
+  if (!(deviceId in remotes)) return remotes;
+  const next = { ...remotes };
+  delete next[deviceId];
+  return next;
+}
+
+/** What choosing a row in the device picker does. */
+export type PickAction =
+  | { kind: "none" }
+  /** The device plays on its own and cannot be chosen until it rejoins. */
+  | { kind: "unavailable" }
+  /** This computer plays: move its playback to `to`. */
+  | { kind: "transfer"; to: string }
+  /** Another device plays: ask it to move its playback to `to`. */
+  | { kind: "remoteTransfer"; via: string; to: string }
+  /** Join the group again; with `claim`, this computer's own playback becomes the active one. */
+  | { kind: "rejoin"; claim: boolean }
+  /** Join the group again and move this computer's own playing music to `to`. */
+  | { kind: "rejoinTransfer"; to: string };
+
+export function pickAction(input: {
+  self: string;
+  target: string;
+  active: string;
+  detached: boolean;
+  detachedPeers: ReadonlySet<string>;
+  hasTrack: boolean;
+  playing: boolean;
+}): PickAction {
+  const { self, target, active, detached, detachedPeers, hasTrack, playing } = input;
+  if (!self || !target) return { kind: "none" };
+  if (target !== self && detachedPeers.has(target)) return { kind: "unavailable" };
+  if (detached) {
+    if (target === self) return { kind: "rejoin", claim: playing };
+    // Music playing here moves to the chosen device; otherwise this computer just joins and follows.
+    return hasTrack && playing ? { kind: "rejoinTransfer", to: target } : { kind: "rejoin", claim: false };
+  }
+  if (target === active) return { kind: "none" };
+  if (active && active !== self) return { kind: "remoteTransfer", via: active, to: target };
+  return { kind: "transfer", to: target };
 }
 
 let counter = 0;
