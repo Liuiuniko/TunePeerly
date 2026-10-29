@@ -518,6 +518,9 @@ fn network_command(state: State<'_, AppState>, action: String, payload: Value) -
             to: payload.get("to").and_then(|v| v.as_str()).map(str::to_string),
             body: payload.get("body").cloned().unwrap_or(Value::Null),
         },
+        "connect-mode" => net::Cmd::ConnectMode {
+            detached: payload.get("detached").and_then(|v| v.as_bool()).unwrap_or(false),
+        },
         "close-route" => net::Cmd::CloseRoutes,
         _ => net::Cmd::Apply,
     };

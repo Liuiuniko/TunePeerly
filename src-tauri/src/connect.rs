@@ -4,13 +4,20 @@
 //! The players live in the web view; this module only checks the messages. Every message is
 //! rebuilt from the fields listed here, so nothing else (a file path, a local file id) can travel
 //! or arrive. Songs are named by content id only.
+//!
+//! A device can leave the group to play on its own ("detached"). While detached it sends only
+//! `connect-leave` and refusals, takes in no reports, and answers every control or transfer with a
+//! refusal, so it neither steers nor follows the others. Detaching lasts until the device rejoins or
+//! the app restarts.
 
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 pub const VERSION: u64 = 1;
-pub const KINDS: [&str; 4] = ["connect-state", "connect-cmd", "connect-ack", "connect-transfer"];
+pub const KINDS: [&str; 5] = ["connect-state", "connect-cmd", "connect-ack", "connect-transfer", "connect-leave"];
+/// The refusal a detached device sends for controls and transfers.
+pub const DETACHED_REASON: &str = "connect.detachedThere";
 pub const MAX_REFS: usize = 2000;
 pub const MAX_STATE_QUEUE: usize = 200;
 pub const MAX_PAST: usize = 200;
@@ -252,6 +259,11 @@ fn sanitize_transfer(body: &Value) -> Option<Value> {
     }))
 }
 
+/// "This device stopped taking part"; it carries nothing else.
+fn sanitize_leave(_body: &Value) -> Option<Value> {
+    Some(json!({"v": VERSION}))
+}
+
 /// The message rebuilt from its allowed fields, or `None` when it is malformed or another version.
 pub fn sanitize(kind: &str, body: &Value) -> Option<Value> {
     if body.get("v").and_then(Value::as_u64) != Some(VERSION) {
@@ -262,10 +274,52 @@ pub fn sanitize(kind: &str, body: &Value) -> Option<Value> {
         "connect-cmd" => sanitize_command(body)?,
         "connect-ack" => sanitize_ack(body)?,
         "connect-transfer" => sanitize_transfer(body)?,
+        "connect-leave" => sanitize_leave(body)?,
         _ => return None,
     };
     out["kind"] = json!(kind);
     Some(out)
+}
+
+/// What happens to a message that arrives from another device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Inbound {
+    /// Handed to the player.
+    Forward,
+    /// Dropped without an answer.
+    Drop,
+    /// Dropped and answered with a refusal, so the sender is not left waiting.
+    Refuse,
+}
+
+pub fn inbound(detached: bool, kind: &str) -> Inbound {
+    if !KINDS.contains(&kind) {
+        return Inbound::Drop;
+    }
+    if !detached {
+        return Inbound::Forward;
+    }
+    match kind {
+        "connect-cmd" | "connect-transfer" => Inbound::Refuse,
+        // A leave or an answer to an earlier control changes nothing here but is still good to know.
+        "connect-leave" | "connect-ack" => Inbound::Forward,
+        _ => Inbound::Drop,
+    }
+}
+
+/// Whether this computer may send a message of `kind`. A detached computer only says it left and
+/// answers controls with refusals.
+pub fn outbound_allowed(detached: bool, kind: &str) -> bool {
+    KINDS.contains(&kind) && (!detached || matches!(kind, "connect-leave" | "connect-ack"))
+}
+
+/// The refusal sent for a control or transfer that reached a detached device.
+pub fn refusal(kind: &str, body: &Value) -> Option<Value> {
+    if !matches!(kind, "connect-cmd" | "connect-transfer") || body.get("v").and_then(Value::as_u64) != Some(VERSION) {
+        return None;
+    }
+    let id = body.get("id")?.as_str().filter(|id| is_token(id))?;
+    Some(json!({"v": VERSION, "kind": "connect-ack", "id": id, "ok": false, "reason": DETACHED_REASON}))
 }
 
 /// Messages counted per device and kind in one-second windows.
@@ -395,6 +449,50 @@ mod tests {
         assert_eq!(ack["reason"], "notice.offlineTrack");
         let odd = sanitize("connect-ack", &json!({"v": 1, "id": "t1", "ok": false, "reason": "<script>"})).unwrap();
         assert!(odd.get("reason").is_none());
+    }
+
+    #[test]
+    fn leave_carries_nothing_else() {
+        let out = sanitize("connect-leave", &json!({"v": 1, "track": {"contentId": SONG}, "path": "C:\\x"})).unwrap();
+        assert_eq!(out, json!({"v": 1, "kind": "connect-leave"}));
+        assert!(sanitize("connect-leave", &json!({"v": 2})).is_none());
+    }
+
+    #[test]
+    fn joined_device_takes_every_kind() {
+        for kind in KINDS {
+            assert_eq!(inbound(false, kind), Inbound::Forward, "{kind}");
+            assert!(outbound_allowed(false, kind), "{kind}");
+        }
+        assert_eq!(inbound(false, "position"), Inbound::Drop);
+        assert!(!outbound_allowed(false, "position"));
+    }
+
+    #[test]
+    fn detached_device_neither_follows_nor_steers() {
+        assert_eq!(inbound(true, "connect-state"), Inbound::Drop);
+        assert_eq!(inbound(true, "connect-cmd"), Inbound::Refuse);
+        assert_eq!(inbound(true, "connect-transfer"), Inbound::Refuse);
+        assert_eq!(inbound(true, "connect-leave"), Inbound::Forward);
+        assert_eq!(inbound(true, "connect-ack"), Inbound::Forward);
+        assert!(!outbound_allowed(true, "connect-state"));
+        assert!(!outbound_allowed(true, "connect-cmd"));
+        assert!(!outbound_allowed(true, "connect-transfer"));
+        assert!(outbound_allowed(true, "connect-leave"));
+        assert!(outbound_allowed(true, "connect-ack"));
+    }
+
+    #[test]
+    fn refusals_name_the_command() {
+        let out = refusal("connect-transfer", &json!({"v": 1, "id": "t9", "positionSec": 1})).unwrap();
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["id"], "t9");
+        assert_eq!(out["reason"], DETACHED_REASON);
+        let ack = sanitize("connect-ack", &out).unwrap();
+        assert_eq!(ack["reason"], DETACHED_REASON);
+        assert!(refusal("connect-cmd", &json!({"v": 1, "id": "bad id"})).is_none());
+        assert!(refusal("connect-state", &json!({"v": 1, "id": "s1"})).is_none());
+        assert!(refusal("connect-cmd", &json!({"v": 2, "id": "c1"})).is_none());
     }
 
     #[test]
