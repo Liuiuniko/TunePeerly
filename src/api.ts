@@ -140,6 +140,8 @@ export type DesktopTrack = {
 export const api = {
   bootstrap: () => invoke<Bootstrap>("bootstrap"),
   importPaths: (paths: string[], kind: "directory" | "file" | "auto") => invoke<ImportSummary[]>("import_paths", { paths, kind }),
+  mobilePickFolder: () => invoke("mobile_pick_folder"),
+  mobileScanMusic: () => invoke<number>("mobile_scan_music"),
   rescan: () => invoke("rescan"),
   removeGrant: (id: number) => invoke("remove_grant", { id }),
   library: () => invoke<Track[]>("library"),
@@ -184,6 +186,11 @@ export const api = {
 export async function pickFolder(): Promise<string | null> {
   const selected = await open({ directory: true, multiple: false });
   return typeof selected === "string" ? selected : null;
+}
+
+/** Android has no dialog that yields readable paths: the picker copies files in, then we scan. */
+export function isAndroidApp(): boolean {
+  return /Android/i.test(navigator.userAgent);
 }
 
 export async function pickFiles(): Promise<string[]> {

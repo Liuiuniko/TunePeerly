@@ -2,7 +2,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { api, errorText, pickFiles, pickFolder, type Bootstrap, type ContentMove, type DownloadFeed, type MemberRef, type OverwriteAsk, type Settings, type Track } from "../api";
+import { api, errorText, isAndroidApp, pickFiles, pickFolder, type Bootstrap, type ContentMove, type DownloadFeed, type MemberRef, type OverwriteAsk, type Settings, type Track } from "../api";
 import i18n from "../i18n";
 import { albumParts, filterText, refOf, reorderVisible, shufflable, trackKey, TrackIndex } from "../lib/library";
 import {
@@ -771,12 +771,25 @@ function useModel() {
 
   const addMusic = useCallback(async (kind: "directory" | "file") => {
     try {
+      if (isAndroidApp()) {
+        // The Android picker copies the chosen tree in the background, so scan until files land.
+        await api.mobilePickFolder();
+        let added = 0;
+        for (let attempt = 0; attempt < 80 && added === 0; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+          added = await api.mobileScanMusic();
+        }
+        toast(added > 0 ? t("toast.imported", { count: added }) : t("toast.importedNone"));
+        reloadLyrics();
+        await refresh();
+        return;
+      }
       const paths = kind === "directory" ? [await pickFolder()].filter((item): item is string => Boolean(item)) : await pickFiles();
       await importPaths(paths, kind);
     } catch (error) {
       say(error);
     }
-  }, [importPaths, say]);
+  }, [importPaths, refresh, reloadLyrics, say, t, toast]);
 
   const like = useCallback(async (track: Track) => {
     const key = trackKey(track);
