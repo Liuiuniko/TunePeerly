@@ -261,9 +261,6 @@ export function SettingsPage() {
             <Icons.incognito /> <span>{t("settings.networkIncognito")}</span>
           </div>
         )}
-        <Row title={t("settings.discovery")} help={t("settings.discoveryHelp")}>
-          <Switch label={t("settings.discovery")} checked={Boolean(settings.discovery)} onChange={(value) => set("discovery", value)} />
-        </Row>
         <Row title={<span className="setting-title-line">{t("settings.autoSend")}<Revise /></span>} help={t("settings.autoSendHelp")}>
           <div className="chip-row">
             {FEATURES.map((feature) => {
@@ -356,7 +353,7 @@ export function SettingsPage() {
           title={<span className="setting-title-line">{t("settings.lanPort")}<Revise /></span>}
           help={
             <>
-              <div>{t("settings.lanPortHelp", { port: boot.listenPort || "—", default: boot.defaultPort })}</div>
+              <div>{t("settings.lanPortHelp", { port: boot.listenPort || "—" })}</div>
               {boot.portFallback ? <div className="setting-error">{t("settings.portFallback", { saved: boot.portFallback, port: boot.listenPort || "—" })}</div> : null}
             </>
           }
@@ -365,7 +362,7 @@ export function SettingsPage() {
             label={t("settings.lanPort")}
             type="number"
             width={110}
-            value={String(settings.listenPort || boot.defaultPort || "")}
+            value={String(settings.listenPort || "")}
             onCommit={(value) => {
               const port = Number(value);
               if (!Number.isInteger(port) || port < 1024 || port > 65535) {

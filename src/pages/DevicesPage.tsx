@@ -3,8 +3,8 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Link } from "../api";
 import { useApp } from "../app/model";
-import { CommitInput, Revise, Row, Select } from "../components/controls";
-import { parseAddress, recentHosts } from "../lib/address";
+import { CommitInput, Revise, Row, Select, Switch } from "../components/controls";
+import { unpairedNearby } from "../lib/devices";
 import { Icons } from "../ui/icons";
 
 export function relayLabel(relay: string, t: (key: string, options?: Record<string, unknown>) => string): { text: string; tone: string } {
@@ -19,27 +19,16 @@ export function DevicesPage() {
   const { t } = useTranslation();
   const app = useApp();
   const boot = app.boot;
-  const [address, setAddress] = useState("");
-  // The "not an IPv4 address" note waits for a submit or leaving the field, so it does not nag while typing.
-  const [checked, setChecked] = useState(false);
   const [nameEpoch, setNameEpoch] = useState(0);
   if (!boot) return null;
 
   const settings = app.settings;
   const networkOff = Boolean(settings.incognito);
-  const pairedIds = new Set(boot.links.map((link) => link.deviceId));
-  const nearby = boot.nearby.filter((item) => !pairedIds.has(item.deviceId) || boot.links.find((link) => link.deviceId === item.deviceId)?.state !== "online");
+  // Nearby is only for devices that are not paired yet; a paired device stays under Paired even when it is offline.
+  const nearby = unpairedNearby(boot.nearby, boot.links);
   const relay = relayLabel(boot.relay, t);
-  const target = parseAddress(address);
-  const badAddress = checked && address.trim() !== "" && !target;
 
   const run = (action: string, payload: unknown = null) => void api.network(action, payload).catch(app.say);
-  // Only the IP goes out; the other computer is asked for its current port.
-  const connect = (host: string) => {
-    setAddress(host);
-    setChecked(false);
-    run("manual", { host });
-  };
   const remove = (link: Link) =>
     app.setDialog({
       kind: "confirm",
@@ -171,6 +160,10 @@ export function DevicesPage() {
           {t("devices.nearby")}
           <Revise />
           {settings.discovery && !networkOff && <span className="scanning" aria-hidden="true" />}
+          <span className="panel-switch" title={t("devices.discoveryHelp")}>
+            <span className="device-switch-label">{t("devices.discovery")}</span>
+            <Switch label={t("devices.discovery")} checked={Boolean(settings.discovery)} onChange={(value) => void app.setSetting("discovery", value)} />
+          </span>
         </h2>
         {!settings.discovery ? (
           <p className="muted">{t("devices.discoveryOff")}</p>
@@ -210,55 +203,6 @@ export function DevicesPage() {
               </li>
             ))}
           </ul>
-        )}
-      </section>
-
-      <section className="panel">
-        <h2>{t("devices.manual")}<Revise /></h2>
-        <p className="setting-help">{t("devices.manualHelp")}</p>
-        <form
-          className="manual-form"
-          noValidate
-          onSubmit={(event) => {
-            event.preventDefault();
-            setChecked(true);
-            if (target) run("manual", target.port ? target : { host: target.host });
-          }}
-        >
-          <input
-            className={`input${badAddress ? " invalid" : ""}`}
-            value={address}
-            placeholder="192.168.1.20"
-            inputMode="decimal"
-            spellCheck={false}
-            aria-label={t("devices.address")}
-            aria-invalid={badAddress}
-            aria-describedby={badAddress ? "manual-address-error" : undefined}
-            onBlur={() => setChecked(true)}
-            onChange={(event) => {
-              setAddress(event.target.value);
-              setChecked(false);
-            }}
-          />
-          <button type="submit" className="btn primary" disabled={!target || boot.manual === "dialing"}>
-            {boot.manual === "dialing" ? t("devices.connecting") : t("devices.connect")}
-          </button>
-          {boot.manual && boot.manual !== "badText" && !badAddress && <span className={`state-text ${boot.manual}`}>{t(`manual.${boot.manual}`)}</span>}
-        </form>
-        {badAddress && (
-          <p id="manual-address-error" className="setting-error" role="alert">
-            {t("devices.badAddress")}
-          </p>
-        )}
-        {recentHosts(settings.manualAddresses ?? []).length > 0 && (
-          <div className="chip-row">
-            <span className="muted small">{t("devices.recent")}</span>
-            {recentHosts(settings.manualAddresses ?? []).map((host) => (
-              <button type="button" key={host} className="chip mono" title={t("devices.connectTo", { address: host })} onClick={() => connect(host)}>
-                {host}
-              </button>
-            ))}
-          </div>
         )}
       </section>
 

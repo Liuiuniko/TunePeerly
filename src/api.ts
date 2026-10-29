@@ -80,7 +80,6 @@ export type Settings = {
   syncRequestDevice?: string;
   displayName?: string;
   listenPort?: number;
-  manualAddresses?: string[];
   silenceSeconds?: number;
   conflictPolicy?: "ask" | "keep" | "take";
   noticeRead?: "open" | "click" | "visible";
@@ -105,8 +104,6 @@ export type Bootstrap = {
   tracks: Track[];
   favoriteIds?: string[];
   listenPort: number;
-  /** Port used unless Settings names another; typing only an IP falls back to it. */
-  defaultPort: number;
   portFallback?: number | null;
   localAddresses?: string[];
   nearby: Nearby[];

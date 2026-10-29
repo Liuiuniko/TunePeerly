@@ -418,7 +418,7 @@
     "pairLan": "Pair on this network",
     "pairLanHelp": "First pairing happens here, between computers on the same network. Both screens show a safety number. After you accept, the two devices remember each other and can reconnect through the relay without pairing again.",
     "paired": "Paired devices",
-    "noPaired": "No paired devices yet. Turn on discovery in Settings and pair with a computer on this network.",
+    "noPaired": "No paired devices yet. Pair with a computer under Nearby.",
     "viaLan": "Local network",
     "viaRelay": "Relay",
     "browse": "Browse",
@@ -426,7 +426,9 @@
     "removeTitle": "Remove {{name}}?",
     "removeBody": "It can no longer sync with this computer or play its music until you pair again.",
     "nearby": "Nearby",
-    "discoveryOff": "Discovery is off. Turn it on in Settings to find computers on this network.",
+    "discoveryOff": "Discovery is off. Turn on the switch above to find computers running this app on your network.",
+    "discovery": "Discover nearby devices",
+    "discoveryHelp": "Announces this computer on the local network a few times a minute. Shares only the device name, never song names.",
     "noNearby": "Looking for computers running this app on your network…",
     "pair": "Pair",
     "addresses": "IPv4 addresses",
@@ -447,14 +449,7 @@
     "blocked": "Blocked devices",
     "noBlocked": "No blocked devices.",
     "blockHelp": "A blocked device cannot connect to this computer. Its requests are dropped, and it only sees a connection failure. You can still see it in this list.",
-    "manual": "Connect by address",
-    "manualHelp": "Enter the other computer's IPv4 address, shown on its Devices page.",
-    "address": "IPv4 address",
-    "badAddress": "Enter an IPv4 address, such as 192.168.1.20.",
     "connect": "Connect",
-    "connectTo": "Connect to {{address}}",
-    "connecting": "Connecting…",
-    "recent": "Recent",
     "paste": "Pair with text",
     "pasteHelp": "Paste the pairing text from the other computer.",
     "pastePlaceholder": "Paste pairing text here",
@@ -468,10 +463,6 @@
     "failed": "Connection failed"
   },
   "manual": {
-    "dialing": "Connecting…",
-    "connected": "Connected",
-    "failed": "Connection failed",
-    "notFound": "No TunePeerly answered at that address. Check that it is open and on the same network.",
     "badText": "That pairing text is not valid."
   },
   "relay": {
@@ -629,8 +620,6 @@
     "networkIncognito": "Incognito is on. Discovery, playback position, and the relay apply again once it is off.",
     "autoSend": "Auto send",
     "autoSendHelp": "After you change a selected item on this computer, send that copy to every paired device that is online. This does not pull their changes. Follow, in Sync below, is what gets their copy.",
-    "discovery": "Discover nearby devices",
-    "discoveryHelp": "Announces this computer on the local network a few times a minute. Shares only the device name, never song names.",
     "relay": "Relay (strelaysrv)",
     "relayHelp": "Connect to paired devices outside your network through your own relay. All four fields are required.",
     "relayHost": "Relay address",
@@ -646,7 +635,7 @@
     "downloadFolder": "Downloads folder",
     "downloadFolderNone": "Not set. You'll be asked on the first download.",
     "lanPort": "LAN port",
-    "lanPortHelp": "Default {{default}}. Listening on {{port}} now. A computer that types only this computer's IP asks for this port automatically. With Nearby discovery off, it tries {{default}}.",
+    "lanPortHelp": "Saved and reused on every start. Listening on {{port}} now.",
     "portInvalid": "Enter a port between 1024 and 65535.",
     "relayPortInvalid": "Enter a port between 1 and 65535.",
     "deviceId": "Device ID",
@@ -654,7 +643,7 @@
     "overwriteMode": "When others overwrite this computer",
     "overwriteModeHelp": "Applies to Send from any paired device. Choose Silent to accept it at once, or Ask to confirm first.",
     "portBusy": "That port is already in use. Pick another one.",
-    "portFallback": "Port {{saved}} is already in use, so this run listens on {{port}}. Typing only this computer's IP still finds it while Nearby discovery is on."
+    "portFallback": "Port {{saved}} is already in use. Listening on {{port}} for now. The saved port is unchanged and will be tried again next start."
   },
   "about": {
     "name": "TunePeerly",

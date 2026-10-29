@@ -3870,6 +3870,13 @@ button.device-name:hover {
   cursor: default;
 }
 
+.panel h2 .panel-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
 .scanning {
   width: 8px;
   height: 8px;
@@ -3890,29 +3897,12 @@ button.device-name:hover {
   }
 }
 
-.manual-form {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin: 10px 0;
-}
-
-.manual-form .input {
-  width: 200px;
-}
-
-.manual-form .input.port {
-  width: 100px;
-}
-
 .state-text {
   font-size: 13px;
   font-weight: 600;
 }
 
-.state-text.failed,
-.state-text.notFound {
+.state-text.failed {
   color: var(--bad);
 }
 
