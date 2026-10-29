@@ -106,7 +106,16 @@ impl Db {
              DROP TABLE IF EXISTS applied_ops;
              DROP TABLE IF EXISTS snapshots;
              DROP TABLE IF EXISTS feature_revisions;
-             DELETE FROM device_settings WHERE key IN ('historySyncMode', 'syncEnabled', 'audioShare', 'positionSync');",
+             DELETE FROM device_settings WHERE key IN ('historySyncMode', 'syncEnabled', 'audioShare', 'positionSync', 'positionSyncDevice');",
+        )?;
+        // Lookups by song and by file. Without these, large libraries scan whole tables on every listing.
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS local_files_content ON local_files(content_id);
+             CREATE INDEX IF NOT EXISTS holdings_content ON holdings(content_id);
+             CREATE INDEX IF NOT EXISTS play_history_content ON play_history(content_id);
+             CREATE INDEX IF NOT EXISTS play_history_file ON play_history(local_file_id);
+             CREATE INDEX IF NOT EXISTS playlist_tracks_content ON playlist_tracks(content_id);
+             CREATE INDEX IF NOT EXISTS playlist_tracks_file ON playlist_tracks(local_file_id);",
         )?;
         Ok(())
     }
@@ -297,6 +306,26 @@ impl Db {
     }
 
     pub fn insert_grant(&self, kind: &str, path: &str) -> AppResult<i64> {
+        // The same folder written another way (trailing slash, other letter case on Windows) is the same grant.
+        let path = grant_path(path);
+        let path = path.as_str();
+        let same: Option<i64> = {
+            let mut stmt = self.conn.prepare("SELECT id, path FROM grants")?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+            let mut found = None;
+            for row in rows {
+                let (id, stored) = row?;
+                if same_grant_path(&stored, path) {
+                    found = Some(id);
+                    break;
+                }
+            }
+            found
+        };
+        if let Some(id) = same {
+            self.conn.execute("UPDATE grants SET kind = ?1 WHERE id = ?2", params![kind, id])?;
+            return Ok(id);
+        }
         self.conn.execute(
             "INSERT INTO grants(kind, path, exposure) VALUES(?1, ?2, 'follow')
              ON CONFLICT(path) DO UPDATE SET kind = excluded.kind",
@@ -330,6 +359,8 @@ impl Db {
             )
             .optional()?;
         if grant.is_some() {
+            // All or nothing, so a failure never leaves half of the folder's songs behind.
+            let tx = self.conn.unchecked_transaction()?;
             // A song that another folder also covers is already in the library through that folder.
             let ids: Vec<String> = {
                 let mut stmt = self.conn.prepare(if keep_tracks {
@@ -356,6 +387,7 @@ impl Db {
             }
             self.conn
                 .execute("DELETE FROM grants WHERE id = ?1", params![id])?;
+            tx.commit()?;
         }
         Ok(grant)
     }
@@ -504,10 +536,10 @@ impl Db {
     }
 
     pub fn delete_playlist(&self, id: &str) -> AppResult<()> {
-        self.conn
-            .execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", params![id])?;
-        self.conn
-            .execute("DELETE FROM playlists WHERE id = ?1", params![id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?1", params![id])?;
+        tx.execute("DELETE FROM playlists WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -542,6 +574,10 @@ impl Db {
                 params![playlist_id],
                 |row| row.get(0),
             )?;
+            // A list that only follows the default leaves the song as its folder or the user set it.
+            if exposure == "follow" {
+                return Ok(());
+            }
             let exposed = self.resolve_exposure(&exposure)?;
             self.conn.execute(
                 "UPDATE local_files SET exposed = ?1 WHERE local_file_id = ?2",
@@ -792,25 +828,6 @@ impl Db {
         Ok(saved)
     }
 
-    pub fn is_favorite(&self, content_id: Option<&str>, local_file_id: Option<&str>) -> AppResult<bool> {
-        let count: i64 = if let Some(content_id) = content_id {
-            self.conn.query_row(
-                "SELECT COUNT(*) FROM favorites WHERE content_id = ?1",
-                params![content_id],
-                |row| row.get(0),
-            )?
-        } else if let Some(local_file_id) = local_file_id {
-            self.conn.query_row(
-                "SELECT COUNT(*) FROM favorites WHERE local_file_id = ?1",
-                params![local_file_id],
-                |row| row.get(0),
-            )?
-        } else {
-            0
-        };
-        Ok(count > 0)
-    }
-
     pub fn favorite_content_ids(&self) -> AppResult<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT COALESCE(f.content_id, lf.content_id)
@@ -849,15 +866,10 @@ impl Db {
             return Ok(false);
         }
         // One transaction, so a failure never leaves this device's catalog empty without a new revision.
-        self.conn.execute_batch("BEGIN")?;
-        let written = self.write_peer_holdings(device_id, revision, rows);
-        match written {
-            Ok(()) => self.conn.execute_batch("COMMIT")?,
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                return Err(err);
-            }
-        }
+        // Dropping it without a commit, including after a failed commit, rolls it back.
+        let tx = self.conn.unchecked_transaction()?;
+        self.write_peer_holdings(device_id, revision, rows)?;
+        tx.commit()?;
         Ok(true)
     }
 
@@ -965,17 +977,22 @@ impl Db {
         Ok(out)
     }
 
+    /// All or nothing: a failed write leaves the earlier history in place.
     pub fn replace_synced_history(&self, entries: &[HistoryEntry]) -> AppResult<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM play_history WHERE content_id IS NOT NULL",
             [],
         )?;
-        for entry in entries {
-            self.conn.execute(
+        {
+            let mut insert = tx.prepare(
                 "INSERT INTO play_history(content_id, local_file_id, played_at) VALUES(?1, NULL, ?2)",
-                params![entry.content_id, entry.at.to_rfc3339()],
             )?;
+            for entry in entries {
+                insert.execute(params![entry.content_id, entry.at.to_rfc3339()])?;
+            }
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1123,17 +1140,18 @@ impl Db {
             .optional()?)
     }
 
-    pub fn content_unplayable(&self, content_id: &str) -> AppResult<bool> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT unplayable FROM content_items WHERE content_id = ?1",
-                params![content_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0)
-            == 1)
+    /// Content marked unplayable, for listing many songs at once.
+    pub fn unplayable_content_ids(&self) -> AppResult<HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT content_id FROM content_items WHERE unplayable = 1")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<HashSet<_>, _>>()?)
+    }
+
+    /// Content ids marked as favorites, for listing many songs at once.
+    pub fn favorite_content_set(&self) -> AppResult<HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT content_id FROM favorites WHERE content_id IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<HashSet<_>, _>>()?)
     }
 
     /// Returns each matching local file with a lyrics excerpt when the lyrics column matched.
@@ -1443,7 +1461,6 @@ pub fn fts_query(query: &str) -> String {
 fn device_defaults() -> Vec<(&'static str, Value)> {
     vec![
         ("historyCap", json!(100)),
-        ("historySyncMode", json!("utc")),
         ("historySync", json!(false)),
         ("historyStartup", json!(false)),
         ("historyPaused", json!(false)),
@@ -1451,16 +1468,12 @@ fn device_defaults() -> Vec<(&'static str, Value)> {
         ("syncSources", json!({})),
         ("dirty", json!({})),
         ("exposeDefault", json!("hide")),
-        ("positionSync", json!(false)),
-        ("positionSyncDevice", json!("")),
         ("downloadFolder", json!("")),
         ("volume", json!(1.0)),
         ("window", json!({})),
         ("relayHost", json!("")),
         ("relayPort", json!(22067)),
         ("relayDeviceId", json!("")),
-        ("syncEnabled", json!(true)),
-        ("audioShare", json!(true)),
         ("autoSend", json!({})),
         ("displayName", json!("")),
         ("holdingsRevision", json!(0)),
@@ -1648,10 +1661,113 @@ CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(
 );
 "#;
 
+/// A grant path without trailing separators. A drive root such as `D:\` or `/` keeps its separator.
+fn grant_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        let root_len = trimmed.len() + usize::from(path.len() > trimmed.len());
+        return path[..root_len].to_string();
+    }
+    trimmed.to_string()
+}
+
+/// Windows paths ignore letter case and accept either slash.
+fn same_grant_path(left: &str, right: &str) -> bool {
+    let left = grant_path(left);
+    let right = grant_path(right);
+    if cfg!(windows) {
+        left.replace('/', "\\").to_lowercase() == right.replace('/', "\\").to_lowercase()
+    } else {
+        left == right
+    }
+}
+
 pub fn merge_history_into_db(db: &Db, remote: Vec<HistoryEntry>) -> AppResult<Vec<HistoryEntry>> {
     let local = db.history_for_sync()?;
     let cap = db.setting_i64("historyCap")?.max(1) as usize;
     let merged = merge_history(local, remote, Utc::now(), cap);
     db.replace_synced_history(&merged)?;
     Ok(merged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_db(name: &str) -> (Db, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("tunepeerly-db-{name}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("library.db"), dir.clone(), dir.join("cache")).unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn grant_paths_lose_trailing_separators_but_roots_stay() {
+        assert_eq!(grant_path(r"D:\Music\"), r"D:\Music");
+        assert_eq!(grant_path("/home/me/music//"), "/home/me/music");
+        assert_eq!(grant_path(r"D:\"), r"D:\");
+        assert_eq!(grant_path("D:"), "D:");
+        assert_eq!(grant_path("/"), "/");
+        assert!(same_grant_path(r"D:\Music", r"D:\Music\"));
+        assert_eq!(same_grant_path(r"D:\Music", r"d:\music"), cfg!(windows));
+    }
+
+    #[test]
+    fn the_same_folder_added_twice_is_one_grant() {
+        let (db, dir) = open_db("grant");
+        let first = db.insert_grant("directory", r"D:\Music").unwrap();
+        let second = db.insert_grant("directory", r"D:\Music\").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(db.grants().unwrap().len(), 1);
+        assert_eq!(db.grants().unwrap()[0].path, r"D:\Music");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn opening_twice_keeps_removed_settings_away_and_indexes_in_place() {
+        let (db, dir) = open_db("migrate");
+        drop(db);
+        let db = Db::open(&dir.join("library.db"), dir.clone(), dir.join("cache")).unwrap();
+        let legacy: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM device_settings WHERE key IN ('historySyncMode', 'syncEnabled', 'audioShare', 'positionSync', 'positionSyncDevice')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy, 0);
+        let indexes: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'holdings_content'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(indexes, 1);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_holdings_write_keeps_the_earlier_catalog() {
+        let (db, dir) = open_db("holdings");
+        let row = |id: &str| HoldingInput {
+            content_id: id.into(),
+            title: "t".into(),
+            artist: String::new(),
+            album: String::new(),
+            track_number: None,
+            duration_ms: None,
+            codec: String::new(),
+        };
+        assert!(db.replace_peer_holdings("peer", 1, &[row("a")]).unwrap());
+        db.conn.execute_batch("CREATE TRIGGER fail_b BEFORE INSERT ON holdings WHEN NEW.content_id = 'b' BEGIN SELECT RAISE(ABORT, 'no'); END;").unwrap();
+        assert!(db.replace_peer_holdings("peer", 2, &[row("c"), row("b")]).is_err());
+        assert!(db.conn.is_autocommit());
+        let held: Vec<String> = {
+            let mut stmt = db.conn.prepare("SELECT content_id FROM holdings WHERE device_id = 'peer'").unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+        };
+        assert_eq!(held, vec!["a".to_string()]);
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

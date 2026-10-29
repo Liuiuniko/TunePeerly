@@ -282,20 +282,6 @@ export function SettingsPage() {
             })}
           </div>
         </Row>
-        <Row title={<span className="setting-title-line">{t("settings.positionSync")}<DoNotUse /></span>} help={t("settings.positionSyncHelp")}>
-          <Select
-            label={t("settings.positionSync")}
-            value={String(settings.positionSyncDevice ?? "")}
-            disabled={Boolean(settings.incognito)}
-            onChange={(value) => set("positionSyncDevice", value)}
-            options={[
-              { value: "", label: t("settings.positionSyncOff") },
-              ...boot.links
-                .filter((link) => link.deviceId !== boot.deviceId && (link.state === "online" || link.deviceId === settings.positionSyncDevice))
-                .map((link) => ({ value: link.deviceId, label: link.name || link.deviceId })),
-            ]}
-          />
-        </Row>
         <h3><span className="setting-title-line">{t("settings.relay")}<NotImplemented /><DoNotUse /></span></h3>
         <p className="setting-help">
           {t("settings.relayHelp")} <span className={`state-pill ${relay.tone}`}>{relay.text}</span>
@@ -312,7 +298,7 @@ export function SettingsPage() {
             onCommit={(value) => {
               const port = Number(value);
               if (Number.isInteger(port) && port > 0 && port < 65536) set("relayPort", port);
-              else app.setNotice(t("settings.portInvalid"));
+              else app.setNotice(t("settings.relayPortInvalid"));
             }}
           />
         </Row>

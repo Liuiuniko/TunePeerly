@@ -1,6 +1,5 @@
 // Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { transport } from "./player/clock";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { setDropHandler } from "./app/drag";
@@ -88,20 +87,21 @@ function Shell() {
       const unlisten = await listen<{ action: string }>("desktop-action", (event) => {
         const model = latest.current;
         switch (event.payload.action) {
+          // Media keys and the system controls steer the active device, here or elsewhere.
           case "toggle":
-            if (!model.following) model.toggle();
+            model.toggle();
             break;
           case "play":
-            if (!model.following && !transport.get().playing) model.toggle();
+            model.play();
             break;
           case "pause":
-            if (!model.following) model.engine.pause();
+            model.pause();
             break;
           case "next":
-            if (!model.following) model.next();
+            model.next();
             break;
           case "previous":
-            if (!model.following) model.previous();
+            model.previous();
             break;
           case "like":
             if (model.shown) void model.like(model.shown);
@@ -212,7 +212,7 @@ function Shell() {
         model.setVolume(model.volume - 0.05);
       } else if (!ctrl && !event.shiftKey && !onSlider && !onWidget && (event.key === "ArrowLeft" || event.key === "ArrowRight") && model.current) {
         event.preventDefault();
-        model.engine.skip(event.key === "ArrowRight" ? 5 : -5);
+        model.skip(event.key === "ArrowRight" ? 5 : -5);
       }
     };
     const onMouse = (event: MouseEvent) => {

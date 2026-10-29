@@ -2,14 +2,26 @@
 type Clock = { position: number; duration: number };
 type Transport = { playing: boolean };
 
+/**
+ * The player engine writes this computer's playback here. While another device is the active
+ * playback device, `show` puts that device's playback on screen instead, so every progress bar and
+ * play button follows the device that is really playing.
+ */
 function createStore<T>(initial: T) {
-  let value = initial;
+  let local = initial;
+  let shown: T | null = null;
   const listeners = new Set<() => void>();
+  const notify = () => listeners.forEach((listener) => listener());
   return {
-    get: () => value,
+    get: () => shown ?? local,
     set: (next: T) => {
-      value = next;
-      listeners.forEach((listener) => listener());
+      local = next;
+      if (shown === null) notify();
+    },
+    show: (next: T | null) => {
+      if (next === null && shown === null) return;
+      shown = next;
+      notify();
     },
     subscribe: (listener: () => void) => {
       listeners.add(listener);

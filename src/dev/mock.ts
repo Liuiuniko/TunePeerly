@@ -125,7 +125,6 @@ const settings: Record<string, unknown> = {
   syncSources: { favorites: "dev-studio" },
   syncBlocks: {},
   exposeDefault: "hide",
-  positionSyncDevice: "",
   downloadFolder: "",
   volume: 0.8,
   relayHost: "",
@@ -133,8 +132,6 @@ const settings: Record<string, unknown> = {
   relayDeviceId: "",
   relayToken: "",
   discovery: true,
-  syncEnabled: true,
-  audioShare: true,
   autoSend: {},
   displayName: "Desk PC",
   listenPort: 22000,
@@ -161,29 +158,6 @@ const state = {
 
 function emit(event: string, payload: unknown = {}) {
   for (const id of listeners.get(event) ?? []) callbacks.get(id)?.({ event, id, payload });
-}
-
-let playbackPreview = 0;
-function previewPlayback(deviceId: string) {
-  window.clearInterval(playbackPreview);
-  if (!deviceId) return;
-  const song = tracks.find((track) => track.playable);
-  if (!song) return;
-  const started = Date.now();
-  const send = () => {
-    emit("playback-mirror", {
-      deviceId,
-      contentId: song.contentId,
-      seconds: 20 + (Date.now() - started) / 1000,
-      playing: true,
-      duration: (song.durationMs ?? 180000) / 1000,
-      title: song.title,
-      artist: song.artist,
-      album: song.album,
-    });
-  };
-  send();
-  playbackPreview = window.setInterval(send, 1000);
 }
 
 const audio = new Map<string, string>();
@@ -384,7 +358,6 @@ async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<
       if (args.key === "theme") state.theme = String(args.value);
       else if (args.key === "language") state.language = String(args.value);
       else settings[String(args.key)] = args.value;
-      if (args.key === "positionSyncDevice") previewPlayback(String(args.value ?? ""));
       return null;
     case "set_exposure": {
       const playlist = playlists.find((item) => item.id === args.id);
@@ -422,9 +395,9 @@ async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<
         }, 1200);
       }
       if (action === "download") {
-        state.download = { contentId: String(args.payload), state: "started", detail: "" };
+        state.download = { seq: Date.now(), contentId: String(args.payload), state: "started", detail: "" };
         setTimeout(() => {
-          state.download = { contentId: String(args.payload), state: "need-folder", detail: "" };
+          state.download = { seq: Date.now(), contentId: String(args.payload), state: "need-folder", detail: "" };
           emit("network-updated");
         }, 900);
       }

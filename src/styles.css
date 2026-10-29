@@ -25,6 +25,8 @@
   --bad-soft: rgba(207, 74, 70, 0.12);
   --info: #4a7fc1;
   --info-soft: rgba(74, 127, 193, 0.13);
+  --connect: #1db954;
+  --on-connect: #04140a;
   --shadow: 0 12px 32px rgba(60, 36, 16, 0.16), 0 2px 6px rgba(60, 36, 16, 0.08);
   --r-xl: 22px;
   --r-lg: 16px;
@@ -1700,6 +1702,11 @@ body.resizing * {
 .badge.remote {
   background: var(--info-soft);
   color: var(--info);
+}
+
+.badge.connect {
+  background: color-mix(in srgb, var(--connect) 16%, transparent);
+  color: var(--connect);
 }
 
 .badge.unavailable {
@@ -4359,6 +4366,142 @@ button.device-name:hover {
   position: fixed;
   inset: 0;
   z-index: 90;
+}
+
+/* ---------- Devices ---------- */
+:root.connect-remote {
+  --player-h: 108px;
+}
+
+.player-bar.remote {
+  grid-template-rows: minmax(0, 1fr) 24px;
+  row-gap: 0;
+}
+
+.player-bar.remote > .player-left,
+.player-bar.remote > .player-center,
+.player-bar.remote > .player-right {
+  grid-row: 1;
+}
+
+.connect-bar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  height: 24px;
+  margin: 0 -12px 0 -8px;
+  padding: 0 18px;
+  background: var(--connect);
+  color: var(--on-connect);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.connect-bar svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.connect-bar span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icon-btn.connect-on {
+  color: var(--connect);
+}
+
+.device-picker {
+  position: relative;
+  display: flex;
+}
+
+.device-popover {
+  position: absolute;
+  right: -48px;
+  bottom: calc(100% + 14px);
+  z-index: 60;
+  width: 290px;
+  padding: 12px 6px 6px;
+  border-radius: var(--r-md);
+  background: var(--elev);
+  box-shadow: var(--shadow), inset 0 0 0 1px var(--line);
+  animation: pop 0.1s ease-out;
+}
+
+.device-popover h3 {
+  margin: 0 10px 8px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.device-popover ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.device-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  text-align: left;
+}
+
+.device-row:hover {
+  background: var(--hover);
+}
+
+.device-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  color: var(--muted);
+}
+
+.device-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.device-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.device-name {
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-state {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.device-row.active .device-icon,
+.device-row.active .device-name,
+.device-row.active .device-state {
+  color: var(--connect);
+}
+
+.device-empty {
+  margin: 6px 10px 4px;
 }
 
 .menu {

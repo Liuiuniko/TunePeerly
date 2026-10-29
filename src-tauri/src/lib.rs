@@ -3,6 +3,7 @@ mod desktop;
 mod catalog;
 mod media;
 mod config;
+mod connect;
 mod db;
 mod error;
 mod frames;
@@ -15,7 +16,7 @@ mod sync_logic;
 mod tls;
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -43,7 +44,7 @@ const NETWORK_KEYS: [&str; 8] = [
 ];
 
 fn online_ids(state: &AppState) -> Vec<String> {
-    let live = state.net.live.inner.lock().expect("live");
+    let live = state.net.live.inner.lock().unwrap_or_else(PoisonError::into_inner);
     live.links.iter().filter(|link| link.state == "online").map(|link| link.device_id.clone()).collect()
 }
 
@@ -51,8 +52,8 @@ fn online_ids(state: &AppState) -> Vec<String> {
 fn bootstrap(state: State<'_, AppState>) -> AppResult<Value> {
     let online = online_ids(&state);
     let local_addresses = net::lan_ipv4().iter().map(|ip| ip.to_string()).collect::<Vec<_>>();
-    let db = state.db.lock().expect("db");
-    let live = state.net.live.inner.lock().expect("live");
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
+    let live = state.net.live.inner.lock().unwrap_or_else(PoisonError::into_inner);
     let blocks = db.blocks()?;
     let notices = db.notices()?;
     let nearby: Vec<_> = live.nearby.iter().filter(|item| !blocks.iter().any(|row| row.device_id == item.device_id)).cloned().collect();
@@ -107,7 +108,7 @@ fn import_paths(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>, 
     for path in &paths {
         let summary = scan::import_path(&state.db, Path::new(path), &kind)?;
         if !allow_grant(&app, &summary.kind, path) {
-            let _ = state.db.lock().expect("db").delete_grant(summary.grant_id, false);
+            let _ = state.db.lock().unwrap_or_else(PoisonError::into_inner).delete_grant(summary.grant_id, false);
             return Err(AppError::Message("file.unreadable".into()));
         }
         summaries.push(summary);
@@ -119,7 +120,7 @@ fn import_paths(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>, 
 
 #[tauri::command(async)]
 fn rescan(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
-    let grants = state.db.lock().expect("db").grants()?;
+    let grants = state.db.lock().unwrap_or_else(PoisonError::into_inner).grants()?;
     for grant in grants {
         if Path::new(&grant.path).exists() {
             // A drive that was connected after start-up is not in the asset scope yet.
@@ -127,7 +128,7 @@ fn rescan(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
             let _ = scan::import_path(&state.db, Path::new(&grant.path), &grant.kind);
         }
     }
-    scan::refresh_access(&state.db.lock().expect("db"))?;
+    scan::refresh_access(&state.db)?;
     let _ = state.net.tx.send(net::Cmd::Publish);
     let _ = app.emit("library-updated", json!({}));
     Ok(())
@@ -144,7 +145,7 @@ fn allow_grant(app: &AppHandle, kind: &str, path: &str) -> bool {
 
 #[tauri::command(async)]
 fn remove_grant(app: AppHandle, state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    let db = state.db.lock().expect("db");
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
     // The asset scope is left alone on purpose. A forbidden path wins over any later allow and cannot
     // be lifted, so adding the same folder again would fail every play with "format not supported".
     // Its songs stay in the library as unavailable, and nothing plays an unavailable song.
@@ -158,35 +159,35 @@ fn remove_grant(app: AppHandle, state: State<'_, AppState>, id: i64) -> AppResul
 #[tauri::command(async)]
 fn library(state: State<'_, AppState>) -> AppResult<Value> {
     let online = online_ids(&state);
-    let db = state.db.lock().expect("db");
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
     catalog::library(&db, &online)
 }
 
 #[tauri::command(async)]
 fn search(state: State<'_, AppState>, query: String) -> AppResult<Value> {
     let online = online_ids(&state);
-    let db = state.db.lock().expect("db");
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
     catalog::search(&db, &query, &online)
 }
 
 #[tauri::command(async)]
 fn lyrics(state: State<'_, AppState>, local_file_id: String) -> AppResult<String> {
-    state.db.lock().expect("db").lyrics(&local_file_id)
+    state.db.lock().unwrap_or_else(PoisonError::into_inner).lyrics(&local_file_id)
 }
 
 #[tauri::command(async)]
 fn save_player(state: State<'_, AppState>, state_json: Value) -> AppResult<()> {
-    state.db.lock().expect("db").save_player_json(&state_json)
+    state.db.lock().unwrap_or_else(PoisonError::into_inner).save_player_json(&state_json)
 }
 
 #[tauri::command(async)]
 fn save_progress(state: State<'_, AppState>, position_sec: f64) -> AppResult<()> {
-    state.db.lock().expect("db").save_progress(position_sec)
+    state.db.lock().unwrap_or_else(PoisonError::into_inner).save_progress(position_sec)
 }
 
 #[tauri::command(async)]
 fn record_history(state: State<'_, AppState>, content_id: Option<String>, local_file_id: Option<String>) -> AppResult<()> {
-    let db = state.db.lock().expect("db");
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
     if db.setting_bool("incognito").unwrap_or(false) || db.setting_bool("historyPaused").unwrap_or(false) {
         return Ok(());
     }
@@ -210,7 +211,7 @@ fn reveal_path(path: String) -> AppResult<()> {
 
 #[tauri::command(async)]
 fn show_in_folder(state: State<'_, AppState>, local_file_id: String) -> AppResult<()> {
-    let path: String = state.db.lock().expect("db").conn.query_row(
+    let path: String = state.db.lock().unwrap_or_else(PoisonError::into_inner).conn.query_row(
         "SELECT absolute_path FROM local_files WHERE local_file_id = ?1",
         rusqlite::params![local_file_id],
         |row| row.get(0),
@@ -229,7 +230,7 @@ fn playback_result(
     status: String,
     reason: Option<String>,
 ) -> AppResult<()> {
-    let db = state.db.lock().expect("db");
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(id) = &local_file_id {
         db.conn.execute(
             "UPDATE local_files SET playback_status = ?1, playback_reason = ?2 WHERE local_file_id = ?3",
@@ -266,13 +267,13 @@ fn remote_failure(state: State<'_, AppState>, content_id: String, device_id: Str
     state
         .db
         .lock()
-        .expect("db")
+        .unwrap_or_else(PoisonError::into_inner)
         .note_failure(Some(&device_id), Some(&content_id), None, &class, &reason, &device_id)
 }
 
 #[tauri::command(async)]
 fn toggle_favorite(state: State<'_, AppState>, content_id: Option<String>, local_file_id: Option<String>) -> AppResult<bool> {
-    let db = state.db.lock().expect("db");
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
     let added = db.toggle_favorite(content_id.as_deref(), local_file_id.as_deref())?;
     db.mark_dirty("favorites", true)?;
     drop(db);
@@ -285,7 +286,7 @@ fn create_playlist(state: State<'_, AppState>, name: String) -> AppResult<String
     if name.trim().is_empty() {
         return Err(AppError::Message("playlist.nameEmpty".into()));
     }
-    let id = state.db.lock().expect("db").create_playlist(name.trim())?;
+    let id = state.db.lock().unwrap_or_else(PoisonError::into_inner).create_playlist(name.trim())?;
     Ok(id)
 }
 
@@ -294,13 +295,13 @@ fn rename_playlist(state: State<'_, AppState>, id: String, name: String) -> AppR
     if name.trim().is_empty() {
         return Err(AppError::Message("playlist.nameEmpty".into()));
     }
-    state.db.lock().expect("db").rename_playlist(&id, name.trim())?;
+    state.db.lock().unwrap_or_else(PoisonError::into_inner).rename_playlist(&id, name.trim())?;
     Ok(())
 }
 
 #[tauri::command(async)]
 fn delete_playlist(state: State<'_, AppState>, id: String) -> AppResult<()> {
-    state.db.lock().expect("db").delete_playlist(&id)?;
+    state.db.lock().unwrap_or_else(PoisonError::into_inner).delete_playlist(&id)?;
     Ok(())
 }
 
@@ -309,7 +310,7 @@ fn add_to_playlist(state: State<'_, AppState>, playlist_id: String, content_id: 
     state
         .db
         .lock()
-        .expect("db")
+        .unwrap_or_else(PoisonError::into_inner)
         .add_to_playlist(&playlist_id, content_id.as_deref(), local_file_id.as_deref())?;
     let _ = state.net.tx.send(net::Cmd::Publish);
     Ok(())
@@ -325,28 +326,32 @@ fn remove_playlist_member(
     state
         .db
         .lock()
-        .expect("db")
+        .unwrap_or_else(PoisonError::into_inner)
         .remove_member(&playlist_id, content_id.as_deref(), local_file_id.as_deref())?;
     Ok(())
 }
 
 #[tauri::command(async)]
 fn move_playlist_member(state: State<'_, AppState>, playlist_id: String, from: usize, to: usize) -> AppResult<()> {
-    state.db.lock().expect("db").move_member(&playlist_id, from, to)?;
+    state.db.lock().unwrap_or_else(PoisonError::into_inner).move_member(&playlist_id, from, to)?;
     Ok(())
 }
 
 #[tauri::command(async)]
 fn set_library_order(state: State<'_, AppState>, keys: Vec<String>) -> AppResult<()> {
-    state.db.lock().expect("db").set_library_order(&keys)?;
+    state.db.lock().unwrap_or_else(PoisonError::into_inner).set_library_order(&keys)?;
     Ok(())
 }
 
 #[tauri::command(async)]
 fn set_exposure(state: State<'_, AppState>, scope: String, id: String, value: String) -> AppResult<()> {
-    let db = state.db.lock().expect("db");
+    let allowed: &[&str] = if scope == "global" { &["expose", "hide"] } else { &["expose", "hide", "follow"] };
+    if !allowed.contains(&value.as_str()) {
+        return Err(AppError::Message("problems.unknown".into()));
+    }
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
     if scope == "grant" {
-        db.set_grant_exposure(id.parse().unwrap_or(0), &value)?;
+        db.set_grant_exposure(grant_id(&id)?, &value)?;
     } else if scope == "playlist" {
         db.set_playlist_exposure(&id, &value)?;
     } else if scope == "global" {
@@ -357,9 +362,9 @@ fn set_exposure(state: State<'_, AppState>, scope: String, id: String, value: St
 
 #[tauri::command(async)]
 fn expose_members(state: State<'_, AppState>, scope: String, id: String, expose: bool) -> AppResult<()> {
-    let db = state.db.lock().expect("db");
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
     if scope == "grant" {
-        db.expose_grant_members(id.parse().unwrap_or(0), expose)?;
+        db.expose_grant_members(grant_id(&id)?, expose)?;
     } else if scope == "library" {
         db.expose_library_members(expose)?;
     } else {
@@ -370,9 +375,14 @@ fn expose_members(state: State<'_, AppState>, scope: String, id: String, expose:
     Ok(())
 }
 
+/// A folder id from the page. A malformed one is an error instead of silently doing nothing.
+fn grant_id(id: &str) -> AppResult<i64> {
+    id.parse().map_err(|_| AppError::Message("problems.unknown".into()))
+}
+
 #[tauri::command(async)]
 fn set_track_exposure(state: State<'_, AppState>, local_file_id: String, expose: bool) -> AppResult<()> {
-    state.db.lock().expect("db").set_track_exposure(&local_file_id, expose)?;
+    state.db.lock().unwrap_or_else(PoisonError::into_inner).set_track_exposure(&local_file_id, expose)?;
     let _ = state.net.tx.send(net::Cmd::Publish);
     Ok(())
 }
@@ -384,13 +394,16 @@ fn update_setting(app: AppHandle, state: State<'_, AppState>, key: String, value
         if !(1024..=65535).contains(&port) {
             return Err(AppError::Message("settings.portInvalid".into()));
         }
-        let port = port as u16;
+        let port = u16::try_from(port).unwrap_or_default();
         let current = state.net.live.inner.lock().map(|live| live.listen_port).unwrap_or(0);
         if port != current && std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).is_err() {
             return Err(AppError::Message("settings.portBusy".into()));
         }
     }
-    let db = state.db.lock().expect("db");
+    if key == "relayPort" && !value.as_u64().is_some_and(|port| (1..=65535).contains(&port)) {
+        return Err(AppError::Message("settings.portInvalid".into()));
+    }
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
     if key == "theme" || key == "language" {
         let text = value.as_str().unwrap_or("").to_string();
         db.set_synced(&key, &text)?;
@@ -451,7 +464,8 @@ fn network_command(state: State<'_, AppState>, action: String, payload: Value) -
         },
         "manual" => net::Cmd::Manual {
             host: payload.get("host").and_then(|v| v.as_str()).unwrap_or("").trim().to_string(),
-            port: payload.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16,
+            // An out-of-range number is refused instead of wrapping to another port.
+            port: payload.get("port").and_then(|v| v.as_u64()).and_then(|v| u16::try_from(v).ok()).unwrap_or(0),
         },
         "confirm" => net::Cmd::Confirm {
             device_id: payload.get("deviceId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -499,14 +513,10 @@ fn network_command(state: State<'_, AppState>, action: String, payload: Value) -
             local_file_id: payload.get("localFileId").and_then(|v| v.as_str()).map(str::to_string),
             buffer_enough: payload.get("bufferEnough").and_then(|v| v.as_bool()).unwrap_or(false),
         },
-        "position" => net::Cmd::Position {
-            content_id: payload.get("contentId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            seconds: payload.get("seconds").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            playing: payload.get("playing").and_then(|v| v.as_bool()).unwrap_or(false),
-            duration: payload.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            title: payload.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            artist: payload.get("artist").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            album: payload.get("album").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "connect" => net::Cmd::Connect {
+            kind: payload.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            to: payload.get("to").and_then(|v| v.as_str()).map(str::to_string),
+            body: payload.get("body").cloned().unwrap_or(Value::Null),
         },
         "close-route" => net::Cmd::CloseRoutes,
         _ => net::Cmd::Apply,
@@ -517,10 +527,10 @@ fn network_command(state: State<'_, AppState>, action: String, payload: Value) -
 
 #[tauri::command(async)]
 fn remote_url(state: State<'_, AppState>, content_id: String, exclude: Option<Vec<String>>) -> AppResult<Value> {
-    if state.db.lock().expect("db").setting_bool("incognito")? {
+    if state.db.lock().unwrap_or_else(PoisonError::into_inner).setting_bool("incognito")? {
         return Err(AppError::Message("notice.offlineTrack".into()));
     }
-    if let Some(reason) = state.db.lock().expect("db").unplayable_reason(&content_id)? {
+    if let Some(reason) = state.db.lock().unwrap_or_else(PoisonError::into_inner).unplayable_reason(&content_id)? {
         match sync_logic::failure_class(&reason) {
             sync_logic::FailureClass::Decode | sync_logic::FailureClass::Unsupported => {
                 return Err(AppError::Message(reason));
@@ -529,14 +539,14 @@ fn remote_url(state: State<'_, AppState>, content_id: String, exclude: Option<Ve
         }
     }
     let mut holders: Vec<String> = {
-        let db = state.db.lock().expect("db");
+        let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
         let mut stmt = db.conn.prepare("SELECT DISTINCT device_id FROM holdings WHERE content_id = ?1 ORDER BY device_id")?;
         let rows = stmt.query_map(rusqlite::params![content_id], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
     let exclude = exclude.unwrap_or_default();
     holders.retain(|holder| !exclude.contains(holder));
-    let online = state.net.live.inner.lock().expect("live").links.clone();
+    let online = state.net.live.inner.lock().unwrap_or_else(PoisonError::into_inner).links.clone();
     let device_id = holders
         .into_iter()
         .find(|holder| online.iter().any(|link| &link.device_id == holder && link.state == "online"))
@@ -546,7 +556,7 @@ fn remote_url(state: State<'_, AppState>, content_id: String, exclude: Option<Ve
 
 #[tauri::command(async)]
 fn playlist_members(state: State<'_, AppState>, id: String) -> AppResult<Vec<Value>> {
-    let refs = state.db.lock().expect("db").content_member_refs("playlist", Some(&id))?;
+    let refs = state.db.lock().unwrap_or_else(PoisonError::into_inner).content_member_refs("playlist", Some(&id))?;
     Ok(refs.into_iter().map(|item| json!({"contentId": item.content_id, "localFileId": item.local_file_id})).collect())
 }
 
@@ -555,7 +565,12 @@ fn move_membership(state: State<'_, AppState>, previous: String, next: String, a
     if !accept {
         return Ok(());
     }
-    let db = state.db.lock().expect("db");
+    if previous == next {
+        return Ok(());
+    }
+    let db = state.db.lock().unwrap_or_else(PoisonError::into_inner);
+    // All or nothing: favorites, playlists and order move together.
+    let tx = db.conn.unchecked_transaction()?;
     let already: Option<i64> = db
         .conn
         .query_row("SELECT id FROM favorites WHERE content_id = ?1", rusqlite::params![next], |row| row.get(0))
@@ -568,12 +583,19 @@ fn move_membership(state: State<'_, AppState>, previous: String, next: String, a
             rusqlite::params![next, previous],
         )?;
     }
+    // A list that already has the new version keeps that entry, so the song is not listed twice.
+    db.conn.execute(
+        "DELETE FROM playlist_tracks WHERE content_id = ?2
+         AND playlist_id IN (SELECT playlist_id FROM playlist_tracks WHERE content_id = ?1)",
+        rusqlite::params![next, previous],
+    )?;
     db.conn.execute(
         "UPDATE playlist_tracks SET content_id = ?1 WHERE content_id = ?2",
         rusqlite::params![next, previous],
     )?;
     db.retarget_library_order(&previous, &next)?;
     db.mark_dirty("favorites", true)?;
+    tx.commit()?;
     drop(db);
     let _ = state.net.tx.send(net::Cmd::AutoSync("favorites".into()));
     Ok(())
@@ -604,21 +626,23 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let data = app.path().data_dir().expect("data dir");
+            let data = app.path().data_dir().unwrap_or_else(|err| fatal(&format!("data folder: {err}")));
             let cache = config::cache_dir();
             let app_dir = config::app_dir(&data);
             let database = config::database_path(&app_dir);
-            let db = Db::open(&database, app_dir.clone(), cache.clone()).expect("database");
+            let db = Db::open(&database, app_dir.clone(), cache.clone())
+                .unwrap_or_else(|err| fatal(&format!("database {}: {err}", database.display())));
             for grant in db.grants().unwrap_or_default() {
                 if Path::new(&grant.path).exists() {
                     allow_grant(app.handle(), &grant.kind, &grant.path);
                 }
             }
-            let material = identity::load_or_create(&db).expect("identity");
+            let material = identity::load_or_create(&db).unwrap_or_else(|err| fatal(&format!("identity: {err}")));
             let db = Arc::new(Mutex::new(db));
-            let net = net::spawn(app.handle().clone(), db.clone(), material.clone_for_net())?;
+            let net = net::spawn(app.handle().clone(), db.clone(), material.clone_for_net())
+                .unwrap_or_else(|err| fatal(&format!("network: {err}")));
             let _ = net.tx.send(net::Cmd::Apply);
-            let (on_minimize, in_tray) = db.lock().expect("db").mini_flags();
+            let (on_minimize, in_tray) = db.lock().unwrap_or_else(PoisonError::into_inner).mini_flags();
             let worker = BackgroundWork {
                 app: app.handle().clone(),
                 db: db.clone(),
@@ -671,7 +695,23 @@ pub fn run() {
             set_tray_menu
         ])
         .run(tauri::generate_context!())
-        .expect("error while running TunePeerly");
+        .unwrap_or_else(|err| fatal(&format!("{err}")));
+}
+
+/// Release builds have no console and abort on panic, so a startup failure would just vanish.
+/// Say what went wrong in a message box, then leave.
+fn fatal(message: &str) -> ! {
+    eprintln!("TunePeerly cannot start: {message}");
+    #[cfg(windows)]
+    {
+        use windows::core::HSTRING;
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let text = HSTRING::from(format!("TunePeerly cannot start.\n\n{message}"));
+        unsafe {
+            MessageBoxW(None, &text, &HSTRING::from("TunePeerly"), MB_OK | MB_ICONERROR);
+        }
+    }
+    std::process::exit(1)
 }
 
 /// Access checks, covers and content hashing after the window is up. Playback keeps the disk first.
@@ -686,10 +726,8 @@ struct BackgroundWork {
 
 impl BackgroundWork {
     fn run(self) {
-        if let Ok(guard) = self.db.lock() {
-            if scan::refresh_access(&guard).is_ok() {
-                let _ = self.app.emit("library-updated", json!({}));
-            }
+        if scan::refresh_access(&self.db).is_ok() {
+            let _ = self.app.emit("library-updated", json!({}));
         }
         let mut changed = false;
         let mut hashed = false;

@@ -43,6 +43,7 @@ export type Offer = { deviceId: string; name: string; safetyNumber: string; role
 export type BlockedDevice = { deviceId: string; name: string; blockedAt: string };
 export type Notice = { id: number; at: string; kind: string; deviceId: string; name: string; detail: string; read?: boolean; pinned?: boolean };
 export type Download = {
+  seq?: number;
   contentId: string;
   state: "started" | "saved" | "failed" | "need-folder" | "busy";
   detail: string;
@@ -68,7 +69,6 @@ export type Settings = {
   syncSources?: Partial<Record<Feature, string>>;
   syncBlocks?: Partial<Record<Feature | "global", BlockFlags>>;
   exposeDefault?: "expose" | "hide";
-  positionSyncDevice?: string;
   downloadFolder?: string;
   volume?: number;
   relayHost?: string;
@@ -191,7 +191,7 @@ export async function pickFiles(): Promise<string[]> {
   const selected = await open({
     directory: false,
     multiple: true,
-    filters: [{ name: "Audio", extensions: ["flac", "mp3", "wav", "ogg", "opus", "m4a", "aac", "aiff", "aif", "alac", "wma", "ape", "wv", "wave", "oga", "m4b", "mp4", "dsf", "dff", "caf", "tta", "spx"] }],
+    filters: [{ name: "Audio", extensions: ["flac", "mp3", "wav", "ogg", "opus", "m4a", "aac", "aiff", "aif", "alac", "wma", "ape", "wv", "wave", "oga", "m4b", "mp4", "dsf", "dff", "caf", "tta", "spx", "audio"] }],
   });
   if (typeof selected === "string") return [selected];
   return selected ?? [];

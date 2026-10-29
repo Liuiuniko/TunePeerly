@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,8 @@ pub struct PairingOffer {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadStatus {
+    /// Bumped by `store_download` on every new status, so the UI can tell a repeated request from a refresh.
+    pub seq: u64,
     pub content_id: String,
     pub state: String,
     pub detail: String,
@@ -135,6 +137,14 @@ pub struct LiveInner {
     /// Copies this computer asked for with "sync-request", keyed by device and feature, until the deadline.
     /// Only these replies may skip the overwrite question.
     pub sync_requests: HashMap<String, Instant>,
+    /// Sync requests this computer answered recently, keyed like `sync_requests`.
+    pub sync_replies: HashMap<String, Instant>,
+    /// Last device-control report seen from each device, as (epoch, seq).
+    pub connect_seen: HashMap<String, (u64, u64)>,
+    /// Device-control messages counted per sender and kind.
+    pub connect_rate: HashMap<String, crate::connect::RateWindow>,
+    /// Number of the last device-control report this computer sent.
+    pub connect_seq: u64,
 }
 
 pub enum Cmd {
@@ -157,15 +167,8 @@ pub enum Cmd {
     Resolve { feature: String, take: bool },
     Download(String),
     Activity { playing: bool, local_file_id: Option<String>, buffer_enough: bool },
-    Position {
-        content_id: String,
-        seconds: f64,
-        playing: bool,
-        duration: f64,
-        title: String,
-        artist: String,
-        album: String,
-    },
+    /// A device-control message from the player. Reports go to every device, the rest to `to`.
+    Connect { kind: String, to: Option<String>, body: Value },
     CloseRoutes,
     Disconnect(String),
     ResolveOverwrite { id: u64, accept: bool },
@@ -193,10 +196,14 @@ pub fn spawn(
     let live_thread = live.clone();
     let bus_thread = bus.clone();
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("network runtime");
+        // A failure here must not take the whole app down: dropping media_ready_tx makes spawn report the error.
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                eprintln!("network runtime: {err}");
+                return;
+            }
+        };
         let local = tokio::task::LocalSet::new();
         runtime.block_on(local.run_until(async move {
             tokio::task::spawn_local(media::serve(bus_thread.clone(), pull_tx, media_ready_tx));
@@ -239,8 +246,21 @@ async fn run(
     live: Live,
     bus: Arc<AudioBus>,
 ) {
-    let mut store = SignalStore::open(db.clone(), material.identity, material.registration_id)
-        .expect("signal store");
+    let mut store = match SignalStore::open(db.clone(), material.identity, material.registration_id) {
+        Ok(store) => store,
+        Err(err) => {
+            // Stay offline instead of aborting: local playback keeps working and the reason is shown as a notice.
+            eprintln!("signal store: {err}");
+            let _ = db
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .add_notice("networkFailed", "", &err.to_string(), "");
+            let _ = app.emit("network-updated", json!({}));
+            // Keep the thread (and the media proxy beside it) alive and drop commands until the app quits.
+            while rx.recv().await.is_some() {}
+            return;
+        }
+    };
     let _ = store.ensure_prekeys().await;
     // Read the Windows network profiles once now so the first screen already knows which adapters are usable.
     std::thread::spawn(|| {
@@ -364,11 +384,18 @@ async fn run(
                         peers.remove(&device_id);
                         pending.remove(&device_id);
                         ready_sessions.remove(&device_id);
+                        pending_holdings.remove(&device_id);
+                        drop_partial_snapshots(&live, &device_id);
                         if let Ok(mut guard) = live.inner.lock() {
                             if guard.offer.as_ref().is_some_and(|offer| offer.device_id == device_id) {
                                 guard.offer = None;
                             }
+                            // Questions this device asked before it was blocked are dropped.
+                            guard.overwrite_waiting.retain(|ask| ask.device_id != device_id);
+                            guard.overwrite_shown.retain(|ask| ask.device_id != device_id);
+                            promote_overwrites(&mut guard);
                         }
+                        emit_overwrite_asks(&app, &live);
                         publish(&app, &db, &live, &peers);
                     }
                     Cmd::Unblock(device_id) => {
@@ -410,6 +437,8 @@ async fn run(
                         peers.remove(&device_id);
                         pending.remove(&device_id);
                         ready_sessions.remove(&device_id);
+                        pending_holdings.remove(&device_id);
+                        drop_partial_snapshots(&live, &device_id);
                         if let Ok(guard) = db.lock() {
                             let _ = guard.remove_peer(&device_id);
                         }
@@ -451,8 +480,8 @@ async fn run(
                             guard.buffer_enough = buffer_enough;
                         }
                     }
-                    Cmd::Position { content_id, seconds, playing, duration, title, artist, album } => {
-                        send_position(&db, &material, &mut store, &peers, &content_id, seconds, playing, duration, &title, &artist, &album).await;
+                    Cmd::Connect { kind, to, body } => {
+                        send_connect(&db, &live, &material, &mut store, &peers, &kind, to.as_deref(), &body).await;
                     }
                     Cmd::CloseRoutes => bus.close_routes(),
                     Cmd::Disconnect(device_id) => {
@@ -462,6 +491,7 @@ async fn run(
                         peers.remove(&device_id);
                         ready_sessions.remove(&device_id);
                         pending_holdings.remove(&device_id);
+                        drop_partial_snapshots(&live, &device_id);
                         publish(&app, &db, &live, &peers);
                     }
                     Cmd::ResolveOverwrite { id, accept } => {
@@ -492,7 +522,9 @@ async fn run(
                             }
                         }
                         let before = peers.get(&device_id).map(|peer| peer.conn);
-                        adopt_connection(&db, &material, &live, &mut peers, &pending, &app, device_id.clone(), conn, dialed_by, incoming, path, writer, audio, identity_public, cert_der, name);
+                        // Only the connection to the typed address counts as the manual request, and only once.
+                        let manual = target.as_ref().is_some_and(|target| pending.remove(&format!("manual:{target}")));
+                        adopt_connection(&db, &material, &live, &mut peers, &pending, manual, &app, device_id.clone(), conn, dialed_by, incoming, path, writer, audio, identity_public, cert_der, name);
                         if before != Some(conn) && peers.get(&device_id).is_some_and(|peer| peer.confirmed && peer.conn == conn) {
                             ready_sessions.remove(&device_id);
                             send_bundle(&db, &mut store, &peers, &device_id).await;
@@ -500,6 +532,9 @@ async fn run(
                         publish(&app, &db, &live, &peers);
                     }
                     NetEvent::DialFailed { device_id, target } => {
+                        if let Some(target) = &target {
+                            pending.remove(&format!("manual:{target}"));
+                        }
                         if let Ok(mut guard) = live.inner.lock() {
                             if let Some(device_id) = device_id {
                                 guard.failures.insert(device_id, "failed".into());
@@ -536,6 +571,7 @@ async fn run(
                         let removed = peers.remove(&device_id);
                         ready_sessions.remove(&device_id);
                         pending_holdings.remove(&device_id);
+                        drop_partial_snapshots(&live, &device_id);
                         if let Some(peer) = removed {
                             if peer.confirmed {
                                 let paused = live.inner.lock().map(|guard| guard.paused.contains(&device_id)).unwrap_or(false);
@@ -587,8 +623,8 @@ async fn run(
             }
             pull = pull_rx.recv() => {
                 match pull {
-                    Some(Pull::Open { id, device_id, content_id, start, end, reply }) => {
-                        bus.register(id, reply);
+                    Some(Pull::Open { id, device_id, content_id, start, end, reply, queued }) => {
+                        bus.register_limited(id, reply, queued);
                         if let Some(peer) = peers.get(&device_id).filter(|peer| peer.confirmed) {
                             if peer.tx.send(Frame::AudioReq { id, content_id, start, end }).is_err() {
                                 bus.deliver(id, AudioPiece::failed("offline"));
@@ -761,7 +797,7 @@ async fn restart_listener(
     live: &Live,
 ) {
     let ((incognito, discovery, sync, audio), port) = {
-        let guard = db.lock().expect("db");
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
         let switches = switches(&guard);
         let port = guard.setting_i64("listenPort").unwrap_or(0).clamp(0, u16::MAX as i64) as u16;
         (switches, port)
@@ -820,18 +856,41 @@ async fn restart_listener(
     let material = material.clone_parts();
     let provider = provider.clone();
     *listener = Some(tokio::task::spawn_local(async move {
+        // Anyone on the network can connect, so only a few handshakes run at once and each one is timed.
+        let handshakes = Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES));
         loop {
-            let Ok((stream, _)) = tcp.accept().await else { break };
+            let stream = match tcp.accept().await {
+                Ok((stream, _)) => stream,
+                Err(_) => {
+                    // For example too many open sockets; wait instead of spinning.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+            };
+            let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+                drop(stream);
+                continue;
+            };
             let events = events.clone();
             let db = db.clone();
             let material = material.clone();
             let provider = provider.clone();
             tokio::task::spawn_local(async move {
-                let _ = accept_lan(stream, db, material, provider, events).await;
+                let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, accept_lan(stream, db, material, provider, events)).await;
+                drop(permit);
             });
         }
     }));
 }
+
+/// Handshakes from unknown devices that may run at the same time.
+const MAX_HANDSHAKES: usize = 16;
+/// Time allowed for TCP, relay and TLS setup before a connection is dropped.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Both sides send a keepalive every 45 seconds; a connection that stays silent longer is gone.
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(150);
+/// Unconfirmed devices that may wait for an answer at the same time.
+const MAX_UNCONFIRMED: usize = 8;
 
 async fn accept_lan(
     stream: TcpStream,
@@ -922,7 +981,9 @@ where
     let device_id = ids::app_device_id(&identity_public);
     // On a connection we accepted, the other device is the one that dialed. Both sides must agree on this
     // so that, when two devices dial each other at once, they keep the same connection.
-    let dialed_by = if incoming { device_id.clone() } else { dialed_by };
+    // An empty value marks a relay session where the other device is the TLS client, so both sides
+    // name the same dialer and keep the same connection.
+    let dialed_by = if incoming || dialed_by.is_empty() { device_id.clone() } else { dialed_by };
     let refuse = db.lock().ok().is_some_and(|guard| {
         guard.is_blocked(&device_id).unwrap_or(false) || (incoming && guard.silence_active(&device_id))
     });
@@ -948,20 +1009,27 @@ where
     let (mut reader, mut writer) = tokio::io::split(stream);
     let events_read = events.clone();
     let device_read = device_id.clone();
+    // Dropped when the writer stops (connection not used, replaced or removed), so the reader stops too.
+    let (writer_done, mut stop_reading) = tokio::sync::oneshot::channel::<()>();
     tokio::task::spawn_local(async move {
         loop {
-            match frames::read_frame(&mut reader).await {
-                Ok(frame) => {
+            let next = tokio::select! {
+                _ = &mut stop_reading => break,
+                next = tokio::time::timeout(READ_IDLE_TIMEOUT, frames::read_frame(&mut reader)) => next,
+            };
+            match next {
+                Ok(Ok(frame)) => {
                     if events_read.send(NetEvent::Frame { device_id: device_read.clone(), frame }).is_err() {
                         break;
                     }
                 }
-                Err(_) => break,
+                _ => break,
             }
         }
         let _ = events_read.send(NetEvent::Closed { device_id: device_read, conn });
     });
     tokio::task::spawn_local(async move {
+        let _writer_done = writer_done;
         let mut interval = tokio::time::interval(Duration::from_secs(45));
         loop {
             tokio::select! {
@@ -1007,6 +1075,7 @@ fn adopt_connection(
     live: &Live,
     peers: &mut HashMap<String, PeerOut>,
     pending: &HashSet<String>,
+    manual: bool,
     app: &AppHandle,
     device_id: String,
     conn: u64,
@@ -1029,9 +1098,17 @@ fn adopt_connection(
     if blocked || live.inner.lock().ok().is_some_and(|guard| guard.paused.contains(&device_id)) {
         return;
     }
-    let waiting = pending.contains(&device_id) || pending.iter().any(|item| item.starts_with("manual:"));
+    let waiting = pending.contains(&device_id) || manual;
     // First contact is only accepted on a connection the other device opened, or one we dialed on purpose.
     if known.is_none() && !incoming && !waiting {
+        return;
+    }
+    // Strangers cannot fill the device list: only a few unconfirmed devices wait at once.
+    if known.is_none()
+        && !waiting
+        && !peers.contains_key(&device_id)
+        && peers.values().filter(|peer| !peer.confirmed).count() >= MAX_UNCONFIRMED
+    {
         return;
     }
     if let Some(peer) = &known {
@@ -1039,13 +1116,16 @@ fn adopt_connection(
             return;
         }
     }
-    let name = live
-        .inner
-        .lock()
-        .ok()
-        .and_then(|guard| guard.nearby.iter().find(|item| item.device_id == device_id).map(|item| item.name.clone()))
-        .filter(|text| !text.is_empty())
-        .unwrap_or(name);
+    // A paired device keeps its saved name; an unauthenticated announce must not rename it.
+    let saved_name = known.as_ref().map(|peer| peer.display_name.clone()).filter(|text| !text.is_empty() && *text != device_id);
+    let name = saved_name.unwrap_or_else(|| {
+        live.inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.nearby.iter().find(|item| item.device_id == device_id).map(|item| item.name.clone()))
+            .filter(|text| !text.is_empty())
+            .unwrap_or(name)
+    });
     if let Some(existing) = peers.get(&device_id) {
         let smaller = smaller_device(&material.device_id, &device_id);
         let preferred = match smaller {
@@ -1081,7 +1161,13 @@ fn adopt_connection(
         {
             let _ = guard.add_notice("request", &device_id, &name, &path);
         }
-        stage_offer(db, material, live, &identity_public, &cert_der, &name, if incoming { "incoming" } else { "outgoing" }, app);
+        // An unasked request does not replace the pairing question already on screen for another device.
+        let busy = incoming
+            && !waiting
+            && live.inner.lock().ok().is_some_and(|guard| guard.offer.as_ref().is_some_and(|offer| offer.device_id != device_id));
+        if !busy {
+            stage_offer(db, material, live, &identity_public, &cert_der, &name, if incoming { "incoming" } else { "outgoing" }, app);
+        }
     }
 }
 
@@ -1282,6 +1368,7 @@ fn resolve_overwrite(app: &AppHandle, db: &Arc<Mutex<Db>>, live: &Live, id: u64,
         ask
     };
     if let Ok(guard) = db.lock() {
+        let accept = accept && !guard.is_blocked(&ask.device_id).unwrap_or(true);
         if accept {
             apply_snapshot_payload(&guard, &ask.feature, &ask.items);
             sync_appearance_window(app, &guard, &ask.feature);
@@ -1366,7 +1453,7 @@ async fn restart_discovery(
     if let Some(stop) = discovery.take() {
         let _ = stop.send(());
     }
-    let guard = db.lock().expect("db");
+    let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
     let (incognito, enabled, _, _) = switches(&guard);
     let name = guard.setting_string("displayName").unwrap_or_else(|_| "Device".into());
     drop(guard);
@@ -1388,6 +1475,8 @@ async fn restart_discovery(
 }
 
 const DISCOVERY_PORT: u16 = 41220;
+const DISCOVERY_MAX_DEVICES: usize = 64;
+const DISCOVERY_NETS_REFRESH: Duration = Duration::from_secs(5);
 const DISCOVERY_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 168);
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1453,8 +1542,8 @@ fn heard_nearby(id: &str, item: &Heard, nets: &[(Ipv4Addr, Ipv4Addr)]) -> Nearby
 }
 
 /// Announces repeat every few seconds; only a real change reaches the app, so screens are not refreshed for nothing.
-fn send_nearby(events: &mpsc::UnboundedSender<NetEvent>, found: &HashMap<String, Heard>, last_sent: &mut String) {
-    let list = nearby_list(found);
+fn send_nearby(events: &mpsc::UnboundedSender<NetEvent>, found: &HashMap<String, Heard>, nets: &[(Ipv4Addr, Ipv4Addr)], last_sent: &mut String) {
+    let list = nearby_list(found, nets);
     let text = serde_json::to_string(&list).unwrap_or_default();
     if text != *last_sent {
         *last_sent = text;
@@ -1462,9 +1551,8 @@ fn send_nearby(events: &mpsc::UnboundedSender<NetEvent>, found: &HashMap<String,
     }
 }
 
-fn nearby_list(found: &HashMap<String, Heard>) -> Vec<Nearby> {
-    let nets = lan_nets();
-    let mut list: Vec<Nearby> = found.iter().map(|(id, item)| heard_nearby(id, item, &nets)).filter(|item| !item.hosts.is_empty()).collect();
+fn nearby_list(found: &HashMap<String, Heard>, nets: &[(Ipv4Addr, Ipv4Addr)]) -> Vec<Nearby> {
+    let mut list: Vec<Nearby> = found.iter().map(|(id, item)| heard_nearby(id, item, nets)).filter(|item| !item.hosts.is_empty()).collect();
     list.sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.device_id.cmp(&right.device_id)));
     list
 }
@@ -1489,11 +1577,19 @@ fn run_discovery(
     let mut last_sent = String::new();
     let mut last_announce = Instant::now() - Duration::from_secs(30);
     let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); 2048];
+    // Reading the adapters is slow on Windows, so the list is refreshed every few seconds, not per packet.
+    let mut nets = lan_nets();
+    let mut nets_read = Instant::now();
+    let mut replied: HashMap<std::net::IpAddr, Instant> = HashMap::new();
     loop {
         if stop.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
             break;
         }
-        let local = lan_ipv4();
+        if nets_read.elapsed() >= DISCOVERY_NETS_REFRESH {
+            nets = lan_nets();
+            nets_read = Instant::now();
+        }
+        let local: Vec<Ipv4Addr> = nets.iter().map(|(ip, _)| *ip).collect();
         for ip in &local {
             if joined.insert(*ip) {
                 let _ = socket.join_multicast_v4(&DISCOVERY_GROUP, ip);
@@ -1503,9 +1599,17 @@ fn run_discovery(
         match socket.recv_from(&mut buf) {
             Ok((size, src)) => {
                 let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, size) };
-                if let Some(peer) = src.as_socket().and_then(|addr| read_announce(bytes, addr, &device_id)) {
-                    let reply = peer.announce;
+                let parsed = src.as_socket().and_then(|addr| read_announce(bytes, addr, &device_id));
+                // Packets are unauthenticated: a flood of made-up ids must not grow the list without end.
+                let room = parsed.as_ref().is_some_and(|peer| found.contains_key(&peer.id) || found.len() < DISCOVERY_MAX_DEVICES);
+                if let Some(peer) = parsed.filter(|_| room) {
                     let now = Instant::now();
+                    // One answer per sender every second is enough; announces repeat every three seconds.
+                    let reply = peer.announce
+                        && src.as_socket().is_some_and(|addr| {
+                            replied.retain(|_, at| now.duration_since(*at) < Duration::from_secs(1));
+                            replied.len() < DISCOVERY_MAX_DEVICES && replied.insert(addr.ip(), now).is_none()
+                        });
                     let entry = found.entry(peer.id.clone()).or_insert_with(|| Heard {
                         name: String::new(),
                         port: peer.port,
@@ -1519,7 +1623,7 @@ fn run_discovery(
                     entry.sources.insert(peer.host, now);
                     entry.sources.retain(|_, at| now.duration_since(*at) < Duration::from_secs(12));
                     entry.seen = now;
-                    send_nearby(&events, &found, &mut last_sent);
+                    send_nearby(&events, &found, &nets, &mut last_sent);
                     if reply {
                         let packet = announce_packet(&device_id, &name, listen_port, false, &local);
                         let _ = socket.send_to(&packet, &src);
@@ -1534,7 +1638,7 @@ fn run_discovery(
         let before = found.len();
         found.retain(|_, item| now.duration_since(item.seen) < Duration::from_secs(12));
         if found.len() != before {
-            send_nearby(&events, &found, &mut last_sent);
+            send_nearby(&events, &found, &nets, &mut last_sent);
         }
         if last_announce.elapsed() >= Duration::from_secs(3) {
             let packet = announce_packet(&device_id, &name, listen_port, true, &local);
@@ -1586,14 +1690,28 @@ fn read_announce(bytes: &[u8], src: std::net::SocketAddr, self_id: &str) -> Opti
     if message.v != 1 || message.id.is_empty() || message.id == self_id || message.port == 0 {
         return None;
     }
+    if message.id.len() > 128 {
+        return None;
+    }
     Some(ParsedAnnounce {
         id: message.id,
-        name: message.name,
+        name: clean_name(&message.name, 64),
         host: ip.to_string(),
         port: message.port,
         announce: message.announce,
-        addrs: message.addrs,
+        addrs: message.addrs.into_iter().take(16).collect(),
     })
+}
+
+/// A device name from the network, without control or text-direction characters that could disguise it.
+pub(crate) fn clean_name(text: &str, max_chars: usize) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_control() && !matches!(ch, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(max_chars)
+        .collect()
 }
 
 fn txt_value(text: &str) -> String {
@@ -1741,9 +1859,90 @@ fn lan_interface(name: &str, ip: Ipv4Addr) -> bool {
 
 #[cfg(test)]
 mod lan_tests {
-    use super::{accept_holdings_part, holdings_messages, lan_interface, HoldingsBuild, HOLDINGS_PART_BYTES};
+    use super::{
+        accept_holdings_part, accept_snapshot_part, clean_name, download_name, is_cover_image, history_part_messages, holdings_messages, lan_interface,
+        port_setting, HoldingsBuild, HISTORY_PARTS_KEY, HOLDINGS_PART_BYTES, SNAPSHOT_PART_BYTES,
+    };
     use crate::db::HoldingInput;
+    use serde_json::{json, Value};
     use std::collections::HashMap;
+
+    #[test]
+    fn download_names_are_safe_windows_file_names() {
+        assert_eq!(download_name("a/b:c?", "mp3", "id"), "a_b_c_.mp3");
+        assert_eq!(download_name("CON", "flac", "id"), "_CON.flac");
+        assert_eq!(download_name("com1.live", "flac", "id"), "_com1.live.flac");
+        assert_eq!(download_name("Lpt9 ", "flac", "id"), "_Lpt9.flac");
+        assert_eq!(download_name("Console", "flac", "id"), "Console.flac");
+        assert_eq!(download_name("song. . ", "mp3", "id"), "song.mp3");
+        assert_eq!(download_name("..", "mp3", "abc"), "abc.mp3");
+        assert_eq!(download_name("  ", "mp3", "../x"), ".._x.mp3");
+        assert_eq!(download_name("", "mp3", ""), "track.mp3");
+        assert_eq!(download_name("a\tb\u{0}", "mp3", "id"), "a_b_.mp3");
+        let long = "长".repeat(300);
+        assert_eq!(download_name(&long, "mp3", "id").chars().count(), 124);
+    }
+
+    #[test]
+    fn only_picture_bytes_are_kept_as_covers() {
+        assert!(is_cover_image(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10]));
+        assert!(is_cover_image(b"\x89PNG\r\n\x1a\n\0\0"));
+        assert!(!is_cover_image(b"<html>not a picture</html>"));
+        assert!(!is_cover_image(b""));
+    }
+
+    #[test]
+    fn long_history_is_sent_in_parts_and_rebuilt_in_order() {
+        let entries: Vec<Value> = (0..3000)
+            .map(|index| json!({"contentId": format!("{index:064}"), "at": "2026-10-28T00:00:00Z"}))
+            .collect();
+        let messages = history_part_messages(&json!(entries));
+        assert!(messages.len() > 1);
+        let count = messages.len();
+        let mut pending = HashMap::new();
+        let mut rebuilt = None;
+        for (index, message) in messages.iter().enumerate() {
+            assert_eq!(message["part"], json!(index));
+            assert_eq!(message["parts"], json!(count));
+            assert!(serde_json::to_vec(&message["entries"]).unwrap().len() <= SNAPSHOT_PART_BYTES);
+            let done = accept_snapshot_part(&mut pending, "dev", HISTORY_PARTS_KEY, index, count, message["entries"].clone());
+            assert_eq!(done.is_some(), index + 1 == count);
+            rebuilt = rebuilt.or(done);
+        }
+        assert_eq!(rebuilt, Some(json!(entries)));
+        assert!(pending.is_empty());
+        let empty = history_part_messages(&json!([]));
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0]["entries"], json!([]));
+    }
+
+    #[test]
+    fn history_parts_from_another_device_stay_apart() {
+        let mut pending = HashMap::new();
+        assert!(accept_snapshot_part(&mut pending, "a", HISTORY_PARTS_KEY, 0, 2, json!([1])).is_none());
+        assert!(accept_snapshot_part(&mut pending, "b", HISTORY_PARTS_KEY, 1, 2, json!([9])).is_none());
+        assert_eq!(accept_snapshot_part(&mut pending, "a", HISTORY_PARTS_KEY, 1, 2, json!([2])), Some(json!([1, 2])));
+        assert!(accept_snapshot_part(&mut pending, "a", HISTORY_PARTS_KEY, 2, 2, json!([3])).is_none());
+    }
+
+    #[test]
+    fn port_settings_outside_the_tcp_range_are_refused() {
+        assert_eq!(port_setting(Some(22067)), Some(22067));
+        assert_eq!(port_setting(Some(65535)), Some(65535));
+        assert_eq!(port_setting(Some(0)), None);
+        assert_eq!(port_setting(Some(-1)), None);
+        assert_eq!(port_setting(Some(65536 + 80)), None);
+        assert_eq!(port_setting(None), None);
+    }
+
+    #[test]
+    fn network_names_lose_control_and_direction_characters() {
+        assert_eq!(clean_name("  Living room  ", 64), "Living room");
+        assert_eq!(clean_name("Bob\u{202E}gpj.exe", 64), "Bobgpj.exe");
+        assert_eq!(clean_name("a\nb\u{0007}c\u{2066}d", 64), "abcd");
+        assert_eq!(clean_name("音乐电脑", 2), "音乐");
+        assert_eq!(clean_name("\u{200F}", 64), "");
+    }
 
     #[test]
     fn discovery_skips_virtual_and_link_local_adapters() {
@@ -1860,13 +2059,13 @@ async fn restart_relay(
     if let Some(task) = task.take() {
         task.abort();
     }
-    let guard = db.lock().expect("db");
+    let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
     if !relay_ready(&guard) {
         set_relay(live, "");
         return;
     }
     let host = guard.setting_string("relayHost").unwrap_or_default();
-    let port = guard.setting_i64("relayPort").unwrap_or(22067) as u16;
+    let port = relay_port(&guard);
     let relay_id = guard.setting_string("relayDeviceId").unwrap_or_default();
     let token = guard.setting_string("relayToken").unwrap_or_default();
     drop(guard);
@@ -1907,21 +2106,27 @@ async fn relay_session(
     provider: Arc<rustls::crypto::CryptoProvider>,
     events: mpsc::UnboundedSender<NetEvent>,
 ) -> Result<(), String> {
-    let addr = resolve_v4(&host, port).await?;
-    let stream = TcpStream::connect(addr).await.map_err(|err| err.to_string())?;
-    let verifier = Arc::new(tls::IdentityVerifier::relay(provider.clone(), expected));
-    let config = tls::client_config(provider, &parts.cert_der, &parts.cert_key, verifier, Some(b"bep-relay"))
-        .map_err(|err| err.to_string())?;
-    let connector = TlsConnector::from(Arc::new(config));
-    let name = rustls::pki_types::ServerName::try_from("relay.local").map_err(|err| err.to_string())?;
-    let mut tls = connector.connect(name, stream).await.map_err(|err| err.to_string())?;
+    let setup = async {
+        let addr = resolve_v4(&host, port).await?;
+        let stream = TcpStream::connect(addr).await.map_err(|err| err.to_string())?;
+        let verifier = Arc::new(tls::IdentityVerifier::relay(provider.clone(), expected));
+        let config = tls::client_config(provider, &parts.cert_der, &parts.cert_key, verifier, Some(b"bep-relay"))
+            .map_err(|err| err.to_string())?;
+        let connector = TlsConnector::from(Arc::new(config));
+        let name = rustls::pki_types::ServerName::try_from("relay.local").map_err(|err| err.to_string())?;
+        connector.connect(name, stream).await.map_err(|err| err.to_string())
+    };
+    let mut tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, setup).await.map_err(|_| "Connection timed out".to_string())??;
     let peer_certs = tls.get_ref().1.peer_certificates().map(|certs| certs.to_vec()).unwrap_or_default();
     let cert = peer_certs.first().ok_or("missing relay certificate")?;
     if !ids::same_cert_id(&relay_id, cert.as_ref()) || ids::cert_id_bytes(cert.as_ref()) != expected {
         return Err("relay certificate id does not match".into());
     }
     relay::write_message(&mut tls, 2, &relay::join_relay(&token)).await.map_err(|err| err.to_string())?;
-    let (kind, body) = relay::read_message(&mut tls).await.map_err(|err| err.to_string())?;
+    let (kind, body) = tokio::time::timeout(HANDSHAKE_TIMEOUT, relay::read_message(&mut tls))
+        .await
+        .map_err(|_| "Connection timed out".to_string())?
+        .map_err(|err| err.to_string())?;
     if kind != 4 {
         return Err("unexpected relay response".into());
     }
@@ -1930,25 +2135,52 @@ async fn relay_session(
         return Err(message);
     }
     let _ = events.send(NetEvent::RelayState("registered".into()));
-    let mut ping = tokio::time::interval(Duration::from_secs(30));
-    loop {
-        tokio::select! {
-            _ = ping.tick() => {
-                relay::write_message(&mut tls, 0, &[]).await.map_err(|err| err.to_string())?;
+    // Pings go out from their own task, so a half-read message is never cancelled by the timer.
+    let (mut reader, mut writer) = tokio::io::split(tls);
+    let _pinger = AbortOnDrop(tokio::task::spawn_local(async move {
+        let mut ping = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            ping.tick().await;
+            if relay::write_message(&mut writer, 0, &[]).await.is_err() {
+                break;
             }
-            incoming = relay::read_message(&mut tls) => {
-                let (kind, body) = incoming.map_err(|err| err.to_string())?;
-                if kind == 1 {
-                    continue;
-                }
-                if kind == 6 {
-                    if let Ok(invitation) = relay::parse_invitation(&body) {
-                        let _ = events.send(NetEvent::Invitation(invitation));
-                    }
-                }
+        }
+    }));
+    loop {
+        // The relay answers our pings and pings us; long silence means the connection is gone.
+        let (kind, body) = tokio::time::timeout(RELAY_IDLE_TIMEOUT, relay::read_message(&mut reader))
+            .await
+            .map_err(|_| "Connection timed out".to_string())?
+            .map_err(|err| err.to_string())?;
+        if kind == 1 {
+            continue;
+        }
+        if kind == 6 {
+            if let Ok(invitation) = relay::parse_invitation(&body) {
+                let _ = events.send(NetEvent::Invitation(invitation));
             }
         }
     }
+}
+
+const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(100);
+
+/// Stops a helper task when its owner returns or is aborted.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A saved port setting, or `None` when it is not a usable TCP port.
+fn port_setting(value: Option<i64>) -> Option<u16> {
+    value.and_then(|port| u16::try_from(port).ok()).filter(|port| *port != 0)
+}
+
+fn relay_port(db: &Db) -> u16 {
+    port_setting(db.setting_i64("relayPort").ok()).unwrap_or(22067)
 }
 
 async fn resolve_v4(host: &str, port: u16) -> Result<SocketAddr, String> {
@@ -1969,7 +2201,7 @@ async fn maybe_relay_fallback(
     events: &mpsc::UnboundedSender<NetEvent>,
     device_id: &str,
 ) {
-    let guard = db.lock().expect("db");
+    let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
     if !relay_ready(&guard) {
         return;
     }
@@ -1977,7 +2209,7 @@ async fn maybe_relay_fallback(
         return;
     };
     let host = guard.setting_string("relayHost").unwrap_or_default();
-    let port = guard.setting_i64("relayPort").unwrap_or(22067) as u16;
+    let port = relay_port(&guard);
     let relay_id = guard.setting_string("relayDeviceId").unwrap_or_default();
     drop(guard);
     let Some(expected) = ids::parse_cert_id(&relay_id) else { return };
@@ -1986,7 +2218,7 @@ async fn maybe_relay_fallback(
     let provider = provider.clone();
     let events = events.clone();
     tokio::task::spawn_local(async move {
-        let _ = request_relay_session(host, port, expected, target, parts, provider, events).await;
+        let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, request_relay_session(host, port, expected, target, parts, provider, events)).await;
     });
 }
 
@@ -2026,10 +2258,10 @@ async fn join_invited(
     invitation: relay::Invitation,
 ) {
     let (host, port) = {
-        let guard = db.lock().expect("db");
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
         (
             guard.setting_string("relayHost").unwrap_or_default(),
-            guard.setting_i64("relayPort").unwrap_or(22067) as u16,
+            relay_port(&guard),
         )
     };
     let Ok(fallback) = resolve_v4(&host, port).await else { return };
@@ -2044,7 +2276,7 @@ async fn join_invited(
     let provider = provider.clone();
     let events = events.clone();
     let db = db.clone();
-    tokio::task::spawn_local(async move {
+    let session = async move {
         let Ok(mut stream) = TcpStream::connect(target).await else { return };
         if relay::write_message(&mut stream, 3, &relay::join_session(&invitation.key)).await.is_err() {
             return;
@@ -2059,7 +2291,8 @@ async fn join_invited(
         }
         let expected = None;
         let verifier = Arc::new(tls::IdentityVerifier::peer(provider.clone(), expected));
-        let dialed_by = parts.device_id.clone();
+        // The TLS client counts as the dialer on both sides; empty means "the other device".
+        let dialed_by = if invitation.server_socket { String::new() } else { parts.device_id.clone() };
         if invitation.server_socket {
             let Ok(config) = tls::server_config(provider, &parts.cert_der, &parts.cert_key, verifier) else { return };
             let Ok(tls) = tokio_rustls::TlsAcceptor::from(Arc::new(config)).accept(stream).await else { return };
@@ -2072,6 +2305,9 @@ async fn join_invited(
             let certs = tls.get_ref().1.peer_certificates().map(|certs| certs.to_vec()).unwrap_or_default();
             let _ = finish_handshake(tls, certs, db, parts, events, "relay".into(), dialed_by, false, None).await;
         }
+    };
+    tokio::task::spawn_local(async move {
+        let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, session).await;
     });
 }
 
@@ -2146,7 +2382,7 @@ async fn handle_frame(
                     }
                     if accept_private(db, store, device_id, &plain).await {
                         publish(app, db, live, peers);
-                    } else if !reply_sync_request(app, db, material, store, peers, device_id, &plain).await
+                    } else if !reply_sync_request(db, material, store, peers, live, device_id, &plain).await
                         && !reply_history_request(db, material, store, peers, device_id, &plain).await
                     {
                         note_history_reply(live, device_id, &plain);
@@ -2164,7 +2400,9 @@ async fn handle_frame(
             serve_audio(db, peer, live, id, &content_id, start, end);
         }
         Frame::AudioChunk { id, offset, eof, data } => {
-            bus.deliver(id, AudioPiece::chunk(offset, eof, data));
+            if !bus.deliver(id, AudioPiece::chunk(offset, eof, data)) {
+                let _ = peer.tx.send(Frame::AudioCancel { id });
+            }
         }
         Frame::AudioHead { id, total } => {
             bus.deliver(id, AudioPiece::head(total));
@@ -2249,7 +2487,7 @@ fn spawn_cover_fetch(
                     bytes.truncate(at);
                     bytes.extend_from_slice(&piece.data);
                     if piece.eof {
-                        outcome = Some(!bytes.is_empty());
+                        outcome = Some(is_cover_image(&bytes));
                         break;
                     }
                 }
@@ -2555,35 +2793,35 @@ fn apply_plain(
             let _ = guard.add_notice("sync", device_id, &name, &feature);
             eprintln!("sync {feature} from {}: applied", short_id(device_id));
         }
-        "position" => {
-            if guard.setting_bool("incognito").unwrap_or(false) {
+        kind if crate::connect::KINDS.contains(&kind) => {
+            // Like a private session: an incognito computer neither shows nor obeys other devices.
+            if !data_sync_open(&guard) || guard.is_blocked(device_id).unwrap_or(true) {
                 return;
             }
-            let selected = guard.setting_string("positionSyncDevice").unwrap_or_default();
-            if selected.is_empty() || selected != device_id {
-                return;
-            }
-            let content_id = value.get("contentId").and_then(|item| item.as_str()).unwrap_or("");
-            let seconds = value.get("seconds").and_then(|item| item.as_f64()).unwrap_or(0.0);
-            let playing = value.get("playing").and_then(|item| item.as_bool()).unwrap_or(false);
-            let duration = value.get("duration").and_then(|item| item.as_f64()).unwrap_or(0.0);
-            let title = value.get("title").and_then(|item| item.as_str()).unwrap_or("");
-            let artist = value.get("artist").and_then(|item| item.as_str()).unwrap_or("");
-            let album = value.get("album").and_then(|item| item.as_str()).unwrap_or("");
             drop(guard);
-            let _ = app.emit("playback-mirror", json!({
-                "deviceId": device_id,
-                "contentId": content_id,
-                "seconds": seconds,
-                "playing": playing,
-                "duration": duration,
-                "title": title,
-                "artist": artist,
-                "album": album,
-            }));
+            let Some(body) = crate::connect::sanitize(kind, &value) else { return };
+            let Ok(mut state) = live.inner.lock() else { return };
+            let (rate_key, max) = if kind == "connect-state" {
+                (format!("{device_id}:state"), crate::connect::STATE_RATE)
+            } else {
+                (format!("{device_id}:cmd"), crate::connect::COMMAND_RATE)
+            };
+            if !crate::connect::allow(&mut state.connect_rate, &rate_key, Instant::now(), max) {
+                return;
+            }
+            if kind == "connect-state" {
+                let epoch = body.get("epoch").and_then(Value::as_u64).unwrap_or(0);
+                let seq = body.get("seq").and_then(Value::as_u64).unwrap_or(0);
+                if !crate::connect::fresh_state(&mut state.connect_seen, device_id, epoch, seq) {
+                    return;
+                }
+            }
+            drop(state);
+            let _ = app.emit("connect", json!({"from": device_id, "kind": kind, "body": body}));
             return;
         }
-        _ => {}
+        // Messages this version does not know change nothing, so the library is not reloaded.
+        _ => return,
     }
     drop(guard);
     let _ = app.emit("library-updated", json!({}));
@@ -2707,7 +2945,16 @@ fn accept_snapshot_part(
     Some(json!(merged))
 }
 
+/// Parts of a copy that a device was still sending when it went away are not kept.
+fn drop_partial_snapshots(live: &Live, device_id: &str) {
+    let prefix = format!("{device_id}\0");
+    if let Ok(mut guard) = live.inner.lock() {
+        guard.pending_snapshots.retain(|key, _| !key.starts_with(&prefix));
+    }
+}
+
 const SYNC_REQUEST_WINDOW: Duration = Duration::from_secs(120);
+const SYNC_REPLY_INTERVAL: Duration = Duration::from_secs(10);
 
 fn sync_request_key(device_id: &str, feature: &str) -> String {
     format!("{device_id}\0{feature}")
@@ -2752,11 +2999,11 @@ async fn request_sync(
 
 /// The other computer asked for our copy. Send it back only to them, so it replaces their copy.
 async fn reply_sync_request(
-    app: &AppHandle,
     db: &Arc<Mutex<Db>>,
     material: &IdentityMaterial,
     store: &mut SignalStore,
     peers: &HashMap<String, PeerOut>,
+    live: &Live,
     device_id: &str,
     plain: &[u8],
 ) -> bool {
@@ -2772,8 +3019,17 @@ async fn reply_sync_request(
     if !crate::db::FEATURES.contains(&feature.as_str()) {
         return true;
     }
+    // Building a full copy is expensive; repeated requests for the same copy are answered once per window.
+    let fresh = live.inner.lock().map(|mut state| {
+        let now = Instant::now();
+        state.sync_replies.retain(|_, at| now.duration_since(*at) < SYNC_REPLY_INTERVAL);
+        state.sync_replies.insert(sync_request_key(device_id, &feature), now).is_none()
+    }).unwrap_or(true);
+    if !fresh {
+        return true;
+    }
     let answer = {
-        let guard = db.lock().expect("db");
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
         // No manual and Stop all only stop this computer from pushing or following.
         // A device that asked for this copy still receives it.
         if !data_sync_open(&guard) {
@@ -2795,7 +3051,6 @@ async fn reply_sync_request(
     for body in &answer {
         send_private_signed(material, store, peers, device_id, body).await;
     }
-    let _ = app;
     true
 }
 
@@ -2904,7 +3159,7 @@ async fn send_sync(
         return;
     }
     let bodies = {
-        let guard = db.lock().expect("db");
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
         if !data_sync_open(&guard) {
             eprintln!("sync {feature}: not sent, sync is off");
             return;
@@ -2917,6 +3172,11 @@ async fn send_sync(
         if let Some(source) = guard.sync_source(feature).unwrap_or(None)
             && source != material.device_id && !refresh
         {
+            return;
+        }
+        // Unsent changes stay marked when no paired device is connected to receive them.
+        if peers.values().all(|peer| !peer.confirmed) {
+            eprintln!("sync {feature}: not sent, no device is connected");
             return;
         }
         let items = snapshot_items(&guard, feature);
@@ -3012,34 +3272,48 @@ async fn send_sender_key(
     }
 }
 
-async fn send_position(
+/// A random number for this run of the app, so devices can tell a restart from an old report.
+fn connect_epoch() -> u64 {
+    static EPOCH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(|| rand::random::<u32>() as u64)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_connect(
     db: &Arc<Mutex<Db>>,
+    live: &Live,
     material: &IdentityMaterial,
     store: &mut SignalStore,
     peers: &HashMap<String, PeerOut>,
-    content_id: &str,
-    seconds: f64,
-    playing: bool,
-    duration: f64,
-    title: &str,
-    artist: &str,
-    album: &str,
+    kind: &str,
+    to: Option<&str>,
+    body: &Value,
 ) {
     let open = db.lock().ok().is_some_and(|guard| data_sync_open(&guard));
-    if !open || content_id.is_empty() {
+    // Encrypting saves key state to disk, so nothing is sealed when no paired device is connected.
+    if !open || peers.values().all(|peer| !peer.confirmed) {
         return;
     }
-    let body = json!({
-        "kind": "position",
-        "contentId": content_id,
-        "seconds": seconds,
-        "playing": playing,
-        "duration": duration,
-        "title": title,
-        "artist": artist,
-        "album": album,
-    });
-    seal_and_send(material, store, peers, &body).await;
+    let Some(mut message) = crate::connect::sanitize(kind, body) else {
+        eprintln!("connect: {kind} not sent, malformed");
+        return;
+    };
+    if kind == "connect-state" {
+        let seq = live.inner.lock().map(|mut state| {
+            state.connect_seq += 1;
+            state.connect_seq
+        });
+        let Ok(seq) = seq else { return };
+        message["epoch"] = json!(connect_epoch());
+        message["seq"] = json!(seq);
+        seal_and_send(material, store, peers, &message).await;
+        return;
+    }
+    let Some(to) = to.filter(|id| crate::connect::is_device_id(id)) else { return };
+    if !peers.get(to).is_some_and(|peer| peer.confirmed) {
+        return;
+    }
+    send_private_signed(material, store, peers, to, &message).await;
 }
 
 async fn seal_and_send(
@@ -3203,11 +3477,15 @@ async fn session_ready(
     send_private(material, store, peers, device_id, &json!({"kind": "hello", "name": name})).await;
     send_sender_key(material, store, peers, device_id).await;
     // The reconnecting peer needs the full current state even when nothing changed here.
+    // A changed list goes to every device below; then this device already has it.
+    let published = publish_holdings(db, material, store, peers, published_holdings).await;
     let catch_up = db.lock().ok().map(|guard| {
         let mut bodies = Vec::new();
-        let rows = local_publishable(&guard).unwrap_or_default();
-        let revision = guard.our_holdings_revision().unwrap_or(0).max(1);
-        bodies.extend(holdings_messages(revision, &rows));
+        if !published {
+            let rows = local_publishable(&guard).unwrap_or_default();
+            let revision = guard.our_holdings_revision().unwrap_or(0).max(1);
+            bodies.extend(holdings_messages(revision, &rows));
+        }
         for feature in crate::db::FEATURES {
             if let Some(body) = auto_body(&guard, &material.device_id, feature) {
                 bodies.extend(expand_sync_body(body));
@@ -3218,7 +3496,6 @@ async fn session_ready(
     for body in catch_up {
         send_private_signed(material, store, peers, device_id, &body).await;
     }
-    publish_holdings(db, material, store, peers, published_holdings).await;
 }
 
 async fn send_private_signed(
@@ -3270,7 +3547,7 @@ async fn accept_private(db: &Arc<Mutex<Db>>, store: &mut SignalStore, device_id:
     let Ok(value) = serde_json::from_slice::<Value>(plain) else { return false };
     match value.get("kind").and_then(|item| item.as_str()) {
         Some("hello") => {
-            let name = value.get("name").and_then(|item| item.as_str()).unwrap_or("").trim().chars().take(64).collect::<String>();
+            let name = clean_name(value.get("name").and_then(|item| item.as_str()).unwrap_or(""), 64);
             if !name.is_empty() {
                 let _ = db.lock().map(|guard| guard.rename_peer(device_id, &name));
             }
@@ -3297,12 +3574,12 @@ async fn publish_holdings(
     store: &mut SignalStore,
     peers: &HashMap<String, PeerOut>,
     published_holdings: &mut String,
-) {
+) -> bool {
     if peers.values().all(|peer| !peer.confirmed) {
-        return;
+        return false;
     }
     let Some((fingerprint, revision, rows)) = ({
-        let guard = db.lock().expect("db");
+        let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
         let rows = local_publishable(&guard).unwrap_or_default();
         let fingerprint = serde_json::to_string(&rows).unwrap_or_default();
         if fingerprint == *published_holdings {
@@ -3313,12 +3590,13 @@ async fn publish_holdings(
             Some((fingerprint, revision, rows))
         }
     }) else {
-        return;
+        return false;
     };
     *published_holdings = fingerprint;
     for body in holdings_messages(revision, &rows) {
         seal_and_send(material, store, peers, &body).await;
     }
+    true
 }
 
 /// One signal frame cannot carry a whole library, so the list is split.
@@ -3428,7 +3706,9 @@ fn song_title(db: &Db, content_id: &str) -> String {
         .unwrap_or_default()
 }
 
-fn store_download(live: &Live, status: DownloadStatus) {
+fn store_download(live: &Live, mut status: DownloadStatus) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    status.seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut guard) = live.inner.lock() {
         guard.download = Some(status);
     }
@@ -3461,6 +3741,7 @@ async fn start_download(
 ) {
     let set_status = |content_id: &str, state: &str, detail: &str, title: &str| {
         store_download(live, DownloadStatus {
+            seq: 0,
             content_id: content_id.to_string(),
             state: state.into(),
             detail: detail.into(),
@@ -3481,7 +3762,7 @@ async fn start_download(
         publish_download(app, live, None, false);
         return;
     }
-    let guard = db.lock().expect("db");
+    let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
     if guard.setting_bool("incognito").unwrap_or(false) {
         drop(guard);
         if let Ok(mut queued) = live.inner.lock() {
@@ -3541,14 +3822,25 @@ async fn start_download(
     let bus = bus.clone();
     let cmd_tx = tx.clone();
     tokio::task::spawn_local(async move {
+        let directory = PathBuf::from(&folder);
+        // The song goes straight to disk; only a small part of it is in memory at any time.
+        let temp = directory.join(format!(".tunepeerly-download-{content_id}.part"));
         let mut attempt = Some(first);
-        let mut bytes = Vec::new();
+        let mut size = 0u64;
         let mut ok = false;
         while let Some(source) = attempt.take() {
             let Some((_, sender)) = senders.iter().find(|(item, _)| item == &source) else { break };
+            let created = {
+                let directory = directory.clone();
+                let temp = temp.clone();
+                tokio::task::spawn_blocking(move || std::fs::create_dir_all(&directory).and_then(|_| File::create(&temp))).await
+            };
+            let Ok(Ok(file)) = created else { break };
+            let mut part = Some(file);
             let id = rand::random::<u64>();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            bus.register(id, tx);
+            let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            bus.register_limited(id, tx, queued.clone());
             if sender
                 .send(Frame::AudioReq {
                     id,
@@ -3565,30 +3857,55 @@ async fn start_download(
                 }
                 continue;
             }
-            bytes.clear();
+            let mut hasher = blake3::Hasher::new();
+            let mut written = 0u64;
             let mut failed = false;
             let mut total_bytes = 0u64;
             let mut last_progress = Instant::now() - Duration::from_secs(1);
             loop {
                 let piece = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await;
                 let Ok(Some(piece)) = piece else { failed = true; break };
+                media::taken(&queued, &piece);
                 if piece.error.is_some() {
                     failed = true;
                     break;
                 }
                 if let Some(total) = piece.total {
-                    total_bytes = total_bytes.max(total);
-                }
-                if !piece.data.is_empty() {
-                    let at = piece.offset as usize;
-                    // The sender streams from the start. A gap, or more bytes than the announced size, is a bad peer.
-                    let over = total_bytes > 0 && (at as u64).saturating_add(piece.data.len() as u64) > total_bytes;
-                    if at > bytes.len() || over {
+                    if total > MAX_DOWNLOAD_BYTES {
                         failed = true;
                         break;
                     }
-                    bytes.truncate(at);
-                    bytes.extend_from_slice(&piece.data);
+                    total_bytes = total_bytes.max(total);
+                }
+                if !piece.data.is_empty() {
+                    let at = piece.offset;
+                    let end = at.saturating_add(piece.data.len() as u64);
+                    // The sender streams from the start. A gap, or more bytes than the announced size, is a bad peer.
+                    let over = (total_bytes > 0 && end > total_bytes) || end > MAX_DOWNLOAD_BYTES;
+                    if at > written || over {
+                        failed = true;
+                        break;
+                    }
+                    // Bytes sent again are already on disk; only the new part is written.
+                    let fresh = &piece.data[(written - at).min(piece.data.len() as u64) as usize..];
+                    if !fresh.is_empty() {
+                        hasher.update(fresh);
+                        let chunk = fresh.to_vec();
+                        let Some(mut file) = part.take() else { failed = true; break };
+                        let wrote = tokio::task::spawn_blocking(move || {
+                            use std::io::Write;
+                            let result = file.write_all(&chunk);
+                            (file, result)
+                        })
+                        .await;
+                        let Ok((returned, result)) = wrote else { failed = true; break };
+                        part = Some(returned);
+                        if result.is_err() {
+                            failed = true;
+                            break;
+                        }
+                        written += fresh.len() as u64;
+                    }
                 }
                 let due = last_progress.elapsed() >= Duration::from_millis(200) || piece.eof;
                 if due {
@@ -3596,7 +3913,7 @@ async fn start_download(
                     if let Ok(mut guard) = live.inner.lock() {
                         if let Some(status) = guard.download.as_mut() {
                             if status.content_id == content_id && status.state == "started" {
-                                status.received = bytes.len() as u64;
+                                status.received = written;
                                 status.total = total_bytes;
                             }
                         }
@@ -3611,7 +3928,12 @@ async fn start_download(
             if failed {
                 let _ = sender.send(Frame::AudioCancel { id });
             }
-            if !failed && blake3::hash(&bytes).to_hex().as_str() == content_id {
+            let flushed = match part.take() {
+                Some(file) => tokio::task::spawn_blocking(move || file.sync_all()).await.is_ok_and(|result| result.is_ok()),
+                None => false,
+            };
+            if !failed && flushed && hasher.finalize().to_hex().as_str() == content_id {
+                size = written;
                 ok = true;
                 break;
             }
@@ -3620,9 +3942,9 @@ async fn start_download(
                 attempt = Some(next);
             }
         }
-        let size = bytes.len() as u64;
         let finish = |state: &str, detail: &str| {
             store_download(&live, DownloadStatus {
+                seq: 0,
                 content_id: content_id.clone(),
                 state: state.into(),
                 detail: detail.into(),
@@ -3635,24 +3957,23 @@ async fn start_download(
             db.lock().ok().and_then(|guard| guard.push_download_history(&content_id, &title, path, saved_ok).ok())
         };
         if !ok {
+            let temp = temp.clone();
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(&temp)).await;
             finish("failed", "");
             let history = remember("", false);
             publish_download(&app, &live, history, true);
             dequeue_download(&live, &cmd_tx);
             return;
         }
-        let directory = PathBuf::from(&folder);
         let name = download_name(&title, &codec, &content_id);
-        // Writing the file and reading its tags run on the blocking pool, not the network thread.
+        // Moving the file and reading its tags run on the blocking pool, not the network thread.
         // Only the new file is imported; the rest of the folder is not rescanned.
         let saved = {
             let directory = directory.clone();
-            let temp = directory.join(format!(".tunepeerly-download-{content_id}.part"));
             let db = db.clone();
             tokio::task::spawn_blocking(move || {
-                let _ = std::fs::create_dir_all(&directory);
                 let final_path = unique_path(&directory, &name);
-                if std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, &final_path)).is_err() {
+                if std::fs::rename(&temp, &final_path).is_err() {
                     let _ = std::fs::remove_file(&temp);
                     return None;
                 }
@@ -3683,11 +4004,44 @@ async fn start_download(
     });
 }
 
+/// A peer's cover is shown by the WebView, so keep only bytes that are a picture it can draw.
+fn is_cover_image(bytes: &[u8]) -> bool {
+    matches!(
+        image::guess_format(bytes),
+        Ok(image::ImageFormat::Jpeg | image::ImageFormat::Png | image::ImageFormat::Gif | image::ImageFormat::WebP | image::ImageFormat::Bmp)
+    )
+}
+
+/// Largest file a download accepts.
+const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
 fn download_name(title: &str, codec: &str, content_id: &str) -> String {
-    let clean = title.chars().map(|ch| if "\\/:*?\"<>|".contains(ch) { '_' } else { ch }).collect::<String>();
-    let stem = if clean.trim().is_empty() { content_id } else { clean.trim() };
+    let stem = match safe_file_stem(title) {
+        Some(stem) => stem,
+        None => safe_file_stem(content_id).unwrap_or_else(|| "track".into()),
+    };
     let ext = crate::scan::file_extension_for_codec(codec);
     format!("{stem}.{ext}")
+}
+
+/// A peer's title as a Windows file name: no path characters, no trailing dots or spaces
+/// (Windows drops them), no device names such as `CON` or `COM1`, and not overly long.
+fn safe_file_stem(text: &str) -> Option<String> {
+    let clean = text
+        .chars()
+        .map(|ch| if ch.is_control() || "\\/:*?\"<>|".contains(ch) { '_' } else { ch })
+        .take(120)
+        .collect::<String>();
+    let clean = clean.trim().trim_end_matches(['.', ' ']);
+    if clean.is_empty() || clean.chars().all(|ch| ch == '.') {
+        return None;
+    }
+    let device = clean.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || (device.len() == 4
+            && (device.starts_with("COM") || device.starts_with("LPT"))
+            && device.as_bytes()[3].is_ascii_digit());
+    Some(if reserved { format!("_{clean}") } else { clean.to_string() })
 }
 
 fn unique_path(directory: &PathBuf, name: &str) -> PathBuf {
