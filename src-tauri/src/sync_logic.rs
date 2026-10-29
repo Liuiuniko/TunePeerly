@@ -36,23 +36,23 @@ pub fn merge_history(
     now: DateTime<Utc>,
     cap: usize,
 ) -> Vec<HistoryEntry> {
-    let mut merged = Vec::new();
+    // Latest time per song, looked up by id so long histories are not compared pairwise.
+    let mut latest: std::collections::HashMap<String, DateTime<Utc>> = std::collections::HashMap::new();
     for entry in local.into_iter().chain(remote) {
         let at = clamp_future(entry.at, now);
-        if let Some(existing) = merged
-            .iter_mut()
-            .find(|item: &&mut HistoryEntry| item.content_id == entry.content_id)
-        {
-            if at > existing.at {
-                existing.at = at;
-            }
-        } else {
-            merged.push(HistoryEntry {
-                content_id: entry.content_id,
-                at,
-            });
-        }
+        latest
+            .entry(entry.content_id)
+            .and_modify(|existing| {
+                if at > *existing {
+                    *existing = at;
+                }
+            })
+            .or_insert(at);
     }
+    let mut merged: Vec<HistoryEntry> = latest
+        .into_iter()
+        .map(|(content_id, at)| HistoryEntry { content_id, at })
+        .collect();
     merged.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.content_id.cmp(&b.content_id)));
     merged.truncate(cap);
     merged
@@ -197,6 +197,25 @@ mod tests {
         assert_eq!(merged[0].at, now);
         assert_eq!(merged[1].content_id, "a");
         assert_eq!(merged[1].at, now - Duration::minutes(2));
+    }
+
+    #[test]
+    fn long_histories_keep_the_latest_time_per_song() {
+        let now = DateTime::parse_from_rfc3339("2026-10-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let local: Vec<HistoryEntry> = (0..5000)
+            .map(|index| HistoryEntry { content_id: format!("{:05}", index % 2500), at: now - Duration::minutes(index) })
+            .collect();
+        let remote = vec![HistoryEntry { content_id: "02499".into(), at: now - Duration::seconds(1) }];
+        let merged = merge_history(local, remote, now, 3000);
+        assert_eq!(merged.len(), 2500);
+        assert_eq!(merged[0].content_id, "00000");
+        assert_eq!(merged[0].at, now);
+        assert_eq!(merged[1].content_id, "02499");
+        assert_eq!(merged[1].at, now - Duration::seconds(1));
+        assert!(merged.windows(2).all(|pair| pair[0].at >= pair[1].at));
+        assert_eq!(merge_history(merged.clone(), Vec::new(), now, 10).len(), 10);
     }
 
     #[test]

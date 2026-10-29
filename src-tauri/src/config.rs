@@ -13,7 +13,12 @@ pub fn database_path(app_dir: &Path) -> PathBuf {
 }
 
 /// Always `%LOCALAPPDATA%\TunePeerly`. Covers live in `covers` under this directory.
+/// Without the variable the cache would land in whatever folder the app was started from,
+/// so fall back to the profile's own local folder, then to the temp folder.
 pub fn cache_dir() -> PathBuf {
-    let local = std::env::var_os("LOCALAPPDATA").unwrap_or_else(|| std::ffi::OsString::from("."));
-    PathBuf::from(local).join(APP_DIR_NAME)
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
+    let local = set("LOCALAPPDATA")
+        .or_else(|| set("USERPROFILE").map(|home| home.join("AppData").join("Local")))
+        .unwrap_or_else(std::env::temp_dir);
+    local.join(APP_DIR_NAME)
 }

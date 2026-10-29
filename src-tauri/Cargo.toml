@@ -40,6 +40,7 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 rand = "0.9"
 base64 = "0.22"
+encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 whoami = "1"
 if-addrs = "0.14"

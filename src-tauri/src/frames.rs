@@ -131,7 +131,8 @@ impl Frame {
                 total: u64::from_be_bytes(payload[8..16].try_into().unwrap()),
             }),
             9 => Ok(Self::PairAccept),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "unknown frame")),
+            // A frame kind from a newer version: skip it instead of dropping the whole connection.
+            _ => Ok(Self::Keepalive),
         }
     }
 }
@@ -154,4 +155,17 @@ pub async fn read_frame(stream: &mut (impl tokio::io::AsyncReadExt + Unpin)) -> 
     let mut all = header.to_vec();
     all.extend_from_slice(&body);
     Frame::decode(&all)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Frame;
+
+    #[test]
+    fn unknown_frame_kinds_are_skipped() {
+        assert!(matches!(Frame::decode(&[200, 0, 0, 0, 2, 1, 2]), Ok(Frame::Keepalive)));
+        let encoded = Frame::AudioCancel { id: 7 }.encode().unwrap();
+        assert!(matches!(Frame::decode(&encoded), Ok(Frame::AudioCancel { id: 7 })));
+        assert!(Frame::decode(&[200, 0, 0, 0, 9, 1]).is_err());
+    }
 }

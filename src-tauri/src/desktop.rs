@@ -332,7 +332,7 @@ mod windows_media {
                 },
                 WindowsAndMessaging::{
                     CreateIconIndirect, GetClientRect, GetSystemMetrics, GetWindowPlacement, GetWindowRect, IsIconic,
-                    IsWindowVisible, RegisterWindowMessageW, ICONINFO, SM_CXSMICON, WINDOWPLACEMENT, WINDOWPOS, WM_COMMAND,
+                    IsWindowVisible, PostMessageW, RegisterWindowMessageW, ICONINFO, SM_CXSMICON, WINDOWPLACEMENT, WINDOWPOS, WM_COMMAND,
                     WM_SIZE, WM_SYSCOMMAND, WM_WINDOWPOSCHANGING,
                 },
             },
@@ -443,7 +443,9 @@ mod windows_media {
 
     fn apply(app: &AppHandle, track: &DesktopTrack) {
         SHELL.with(|slot| {
-            let mut guard = slot.borrow_mut();
+            // The taskbar calls below can let other window messages run first. If one of them is using the shell
+            // right now, skip this update; the next one comes within a second.
+            let Ok(mut guard) = slot.try_borrow_mut() else { return };
             let Some(shell) = guard.as_mut() else { return };
             let enabled = !track.title.is_empty();
             let signature = format!("{}|{}|{}|{}", track.title, track.artist, track.album, track.cover_path.as_deref().unwrap_or(""));
@@ -539,10 +541,15 @@ mod windows_media {
     /// and tells the window with this message once the button is back. Add them again from the current song.
     static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
-    fn taskbar_button_created(hwnd: HWND) {
+    fn taskbar_button_created(hwnd: HWND, msg: u32) {
         unsafe { mark_iconic(hwnd) };
         SHELL.with(|slot| {
-            let mut guard = slot.borrow_mut();
+            // This message can arrive while apply() is inside a taskbar call and still holds the shell.
+            // Borrowing again would panic, so ask for it again once the current work is done.
+            let Ok(mut guard) = slot.try_borrow_mut() else {
+                let _ = unsafe { PostMessageW(Some(hwnd), msg, WPARAM(0), LPARAM(0)) };
+                return;
+            };
             let Some(shell) = guard.as_mut() else { return };
             shell.buttons = false;
             refresh_buttons(shell, &super::current());
@@ -588,7 +595,7 @@ mod windows_media {
                 LRESULT(0)
             }
             _ if msg != 0 && msg == TASKBAR_CREATED.load(Ordering::Relaxed) => {
-                taskbar_button_created(hwnd);
+                taskbar_button_created(hwnd, msg);
                 unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
             }
             WM_SYSCOMMAND => {
@@ -880,7 +887,11 @@ mod windows_media {
 
     fn remember_window(hwnd: HWND) {
         if let Some(snapshot) = capture_window(hwnd) {
-            SNAPSHOT.with(|slot| *slot.borrow_mut() = Some(snapshot));
+            SNAPSHOT.with(|slot| {
+                if let Ok(mut slot) = slot.try_borrow_mut() {
+                    *slot = Some(snapshot);
+                }
+            });
         }
     }
 

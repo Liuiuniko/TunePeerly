@@ -2,7 +2,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -260,9 +260,19 @@ pub struct SignalStore {
 impl SignalStore {
     pub fn open(db: Arc<Mutex<Db>>, identity: IdentityKeyPair, registration_id: u32) -> AppResult<Self> {
         let maps = {
-            let guard = db.lock().expect("db");
+            let guard = db.lock().unwrap_or_else(PoisonError::into_inner);
             match guard.signal_blob("signal_maps")? {
-                Some(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+                Some(bytes) => match serde_json::from_slice(&bytes) {
+                    Ok(maps) => maps,
+                    Err(err) => {
+                        // Starting empty means paired devices have to set up their sessions again. Keep the
+                        // unreadable copy next to it so the next save does not destroy the only record.
+                        eprintln!("signal_maps unreadable, starting fresh sessions: {err}");
+                        let backup = format!("signal_maps.unreadable.{}", chrono::Utc::now().timestamp());
+                        guard.set_signal_blob(&backup, &bytes)?;
+                        PersistedMaps::default()
+                    }
+                },
                 None => PersistedMaps::default(),
             }
         };
@@ -277,7 +287,7 @@ impl SignalStore {
 
     fn persist(&self) -> AppResult<()> {
         let bytes = serde_json::to_vec(&*self.maps.borrow())?;
-        self.db.lock().expect("db").set_signal_blob("signal_maps", &bytes)
+        self.db.lock().unwrap_or_else(PoisonError::into_inner).set_signal_blob("signal_maps", &bytes)
     }
 
     pub fn trust(&self, name: &str, key: &[u8]) {
@@ -298,7 +308,7 @@ impl SignalStore {
             let mut maps = self.maps.borrow_mut();
             let prefix = format!("{device_id}:");
             maps.sender_keys.retain(|key, _| !key.starts_with(&prefix));
-            maps.sessions.retain(|key, _| !key.starts_with(device_id));
+            maps.sessions.retain(|key, _| key != device_id);
         }
         self.trusted.borrow_mut().remove(device_id);
         let _ = self.persist();
