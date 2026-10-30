@@ -13,6 +13,7 @@ mod error;
 mod frames;
 mod identity;
 mod ids;
+mod mobile_playback;
 mod net;
 mod relay;
 mod scan;
@@ -657,6 +658,7 @@ pub fn run() {
             };
             std::thread::spawn(move || worker.run());
             app.manage(AppState { db, net, material });
+            mobile_playback::remember(app.handle());
             desktop::install(app.handle());
             desktop::sync_mini(app.handle(), on_minimize, in_tray);
             // Only the phone keeps imported music in a folder of its own; on desktop the user's
@@ -669,6 +671,7 @@ pub fn run() {
             bootstrap,
             import_paths,
             mobile_pick_folder,
+            mobile_playback::mobile_playback_update,
             rescan,
             remove_grant,
             library,

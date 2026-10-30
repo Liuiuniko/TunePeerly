@@ -2,12 +2,20 @@
 
 package com.zhebuilds.tunepeerly
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.DocumentsContract
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,9 +35,61 @@ class MainActivity : TauriActivity() {
 
   override fun onDestroy() {
     importer.shutdownNow()
+    // The activity going away is the user closing the app; a service without a player is just a
+    // notification that never goes away.
+    PlaybackSnapshot.playing = false
+    PlaybackService.shutdown(this)
     multicastLock?.let { if (it.isHeld) it.release() }
     multicastLock = null
     super.onDestroy()
+  }
+
+  /**
+   * The web view owns the audio element, and `WryActivity.onPause()` pauses the web view whenever the
+   * activity leaves the foreground, which stops playback. Music apps are expected to keep playing, so
+   * when the player is running the web view is resumed again right after the pause, and a foreground
+   * service plus media session take over the notification and the lock-screen controls.
+   */
+  override fun onPause() {
+    super.onPause()
+    if (!PlaybackSnapshot.playing) return
+    val web = findWebView(window.decorView) ?: return
+    Handler(Looper.getMainLooper()).postDelayed({
+      if (PlaybackSnapshot.playing) {
+        web.onResume()
+        web.resumeTimers()
+      }
+    }, 80L)
+  }
+
+  /**
+   * Called from Rust over JNI whenever the player moves: the JSON carries title, artist, playing,
+   * position and duration. Mirrored into the service, which owns the notification.
+   */
+  @Keep
+  @Suppress("unused")
+  fun updatePlayback(json: String) {
+    runCatching { PlaybackSnapshot.apply(json) }
+      .onFailure { Log.w(TAG, "playback snapshot: ${it.message}") }
+    if (PlaybackSnapshot.playing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+    ) {
+      runOnUiThread {
+        runCatching { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION) }
+      }
+    }
+    PlaybackService.sync(this)
+  }
+
+  /** `WryActivity` keeps its web view private, so it is found by walking the content view instead. */
+  private fun findWebView(view: View): WebView? {
+    if (view is WebView) return view
+    if (view is ViewGroup) {
+      for (index in 0 until view.childCount) {
+        findWebView(view.getChildAt(index))?.let { return it }
+      }
+    }
+    return null
   }
 
   /**
@@ -200,6 +260,7 @@ class MainActivity : TauriActivity() {
     const val MARKER = ".import-done"
     const val FAILED = -1
     const val CANCELLED = -2
+    const val NOTIFICATION_PERMISSION = 4102
     val AUDIO_EXTENSIONS = setOf(
       "mp3", "flac", "m4a", "m4b", "aac", "ogg", "oga", "opus", "wav", "wave",
       "wma", "aiff", "aif", "alac", "ape", "wv", "mp4", "caf", "dsf", "dff", "tta", "spx",
