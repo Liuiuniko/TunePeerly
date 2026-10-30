@@ -2,7 +2,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { api, errorText, pickFiles, pickFolder, type Bootstrap, type ContentMove, type DownloadFeed, type MemberRef, type OverwriteAsk, type Settings, type Track } from "../api";
+import { api, errorText, isAndroidApp, pickFiles, pickFolder, type Bootstrap, type ContentMove, type DownloadFeed, type MemberRef, type OverwriteAsk, type Settings, type Track } from "../api";
 import i18n from "../i18n";
 import { albumParts, filterText, refOf, reorderVisible, shufflable, trackKey, TrackIndex } from "../lib/library";
 import {
@@ -771,12 +771,31 @@ function useModel() {
 
   const addMusic = useCallback(async (kind: "directory" | "file") => {
     try {
+      if (isAndroidApp()) {
+        // The system picker copies the chosen tree into app storage in the background; Rust
+        // rescans when the copy finishes and tells us here, so nothing polls on this side.
+        const done = new Promise<number>((resolve) => {
+          const timer = window.setTimeout(() => resolve(-1), 15 * 60 * 1000);
+          listen<{ added: number }>("mobile-import-finished", (event) => {
+            window.clearTimeout(timer);
+            resolve(event.payload.added);
+          }).catch(() => resolve(-1));
+        });
+        await api.mobilePickFolder();
+        const added = await done;
+        if (added > 0) {
+          toast(t("toast.imported", { count: added }));
+          reloadLyrics();
+          await refresh();
+        }
+        return;
+      }
       const paths = kind === "directory" ? [await pickFolder()].filter((item): item is string => Boolean(item)) : await pickFiles();
       await importPaths(paths, kind);
     } catch (error) {
       say(error);
     }
-  }, [importPaths, say]);
+  }, [importPaths, refresh, reloadLyrics, say, t, toast]);
 
   const like = useCallback(async (track: Track) => {
     const key = trackKey(track);

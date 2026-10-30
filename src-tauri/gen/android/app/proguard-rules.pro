@@ -19,3 +19,7 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# The activity method is called from Rust over JNI by name, so R8 must not rename or strip it.
+-keepclassmembers class com.zhebuilds.tunepeerly.MainActivity {
+    public void openMusicFolderPicker();
+}
