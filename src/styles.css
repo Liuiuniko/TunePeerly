@@ -10,21 +10,25 @@
   --line: rgba(74, 48, 24, 0.1);
   --line-strong: rgba(74, 48, 24, 0.18);
   --text: #2b231c;
-  --muted: #76695c;
+  --muted: #6b5e51;
   --faint: #a7998a;
   --accent: #e0683a;
   --accent-hover: #cc5a2e;
   --accent-soft: rgba(224, 104, 58, 0.13);
-  --accent-text: #c4552a;
+  --accent-text: #a8431f;
   --on-accent: #fffaf5;
   --good: #3a9a6b;
   --good-soft: rgba(58, 154, 107, 0.14);
+  --good-text: #1f6a45;
   --warn: #c28a1e;
   --warn-soft: rgba(194, 138, 30, 0.15);
+  --warn-text: #7a5406;
   --bad: #cf4a46;
   --bad-soft: rgba(207, 74, 70, 0.12);
+  --bad-text: #a52a25;
   --info: #4a7fc1;
   --info-soft: rgba(74, 127, 193, 0.13);
+  --info-text: #37628f;
   --shadow: 0 12px 32px rgba(60, 36, 16, 0.16), 0 2px 6px rgba(60, 36, 16, 0.08);
   --r-xl: 22px;
   --r-lg: 16px;
@@ -55,12 +59,16 @@
   --on-accent: #1d120b;
   --good: #5cc28d;
   --good-soft: rgba(92, 194, 141, 0.15);
+  --good-text: #5cc28d;
   --warn: #e0b04a;
   --warn-soft: rgba(224, 176, 74, 0.15);
+  --warn-text: #e0b04a;
   --bad: #ef6b66;
   --bad-soft: rgba(239, 107, 102, 0.15);
+  --bad-text: #ff8f8a;
   --info: #79a7e3;
   --info-soft: rgba(121, 167, 227, 0.15);
+  --info-text: #79a7e3;
   --shadow: 0 16px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
   color-scheme: dark;
 }
@@ -274,7 +282,7 @@ body.resizing * {
 
 /* The queue entry toggles a panel instead of changing page, so it is tinted rather than filled. */
 .nav-item[aria-pressed="true"] {
-  color: var(--accent);
+  color: var(--accent-text);
   background: transparent;
 }
 
@@ -1512,7 +1520,7 @@ body.resizing * {
 }
 
 .select-option.selected {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .select-check {
@@ -1699,7 +1707,7 @@ body.resizing * {
 
 .badge.remote {
   background: var(--info-soft);
-  color: var(--info);
+  color: var(--info-text);
 }
 
 .badge.connect {
@@ -1709,12 +1717,12 @@ body.resizing * {
 
 .badge.unavailable {
   background: var(--hover);
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .badge.error {
   background: var(--bad-soft);
-  color: var(--bad);
+  color: var(--bad-text);
 }
 
 .badge.mini {
@@ -1766,17 +1774,17 @@ body.resizing * {
 
 .state-pill.online {
   background: var(--good-soft);
-  color: var(--good);
+  color: var(--good-text);
 }
 
 .state-pill.pending {
   background: var(--warn-soft);
-  color: var(--warn);
+  color: var(--warn-text);
 }
 
 .state-pill.failed {
   background: var(--bad-soft);
-  color: var(--bad);
+  color: var(--bad-text);
 }
 
 .pill-row {
@@ -2457,7 +2465,7 @@ body.resizing * {
   height: 18px;
   padding: 0;
   background: transparent;
-  color: var(--faint);
+  color: var(--muted);
   font-weight: 600;
 }
 
@@ -3554,7 +3562,7 @@ body.resizing * {
 .setting-mark.danger {
   background: var(--bad-soft);
   border-color: transparent;
-  color: var(--bad);
+  color: var(--bad-text);
 }
 
 .setting-help {
@@ -5154,7 +5162,7 @@ button.device-name:hover {
 
 .btn.danger-text,
 .btn.danger-text:hover:not(:disabled) {
-  color: #e5484d;
+  color: var(--bad-text);
 }
 
 
