@@ -659,6 +659,9 @@ pub fn run() {
             app.manage(AppState { db, net, material });
             desktop::install(app.handle());
             desktop::sync_mini(app.handle(), on_minimize, in_tray);
+            // Only the phone keeps imported music in a folder of its own; on desktop the user's
+            // own folders are the library, and a stray `%APPDATA%/music` must not be swept up.
+            #[cfg(target_os = "android")]
             import_mobile_music(app.handle());
             Ok(())
         })
@@ -718,18 +721,22 @@ fn cache_root(app: &AppHandle) -> std::path::PathBuf {
     }
 }
 
-/// Where the Android folder picker copies what the user picked (private app storage).
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+/// Android only: where the folder picker copies what the user picked. The activity copies into
+/// `Context.getDataDir()/music`, which is what `data_dir()` resolves to on Android, so both sides
+/// always look at the same folder.
+#[cfg(target_os = "android")]
 fn mobile_music_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path().data_dir().ok().map(|dir| dir.join("music"))
 }
 
-/// The activity drops this file once the picked tree is fully copied, so the scan that follows
-/// never runs against a half-copied folder.
+/// The activity writes this once the picked tree is copied: the number of new files, `-1` when the
+/// copy failed, `-2` when the user cancelled the picker. Rust deletes it before opening the picker,
+/// so a stale value can never be mistaken for a fresh one.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const MOBILE_IMPORT_MARKER: &str = ".import-done";
 
 /// Imports what already sits in the private music folder, e.g. after a restart.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg(target_os = "android")]
 fn import_mobile_music(app: &AppHandle) {
     let Some(dir) = mobile_music_dir(app) else { return };
     if !dir.is_dir() {
@@ -745,30 +752,50 @@ fn import_mobile_music(app: &AppHandle) {
 
 /// Android only: shows the system folder picker, which copies the chosen tree into app storage
 /// because Rust cannot read `content://` URIs. Returns at once; the import happens afterwards and
-/// is reported through `mobile-import-finished`.
+/// is reported through `mobile-import-finished`, including when the user backs out.
 #[tauri::command(async)]
 fn mobile_pick_folder(app: AppHandle) -> AppResult<()> {
     #[cfg(target_os = "android")]
     {
         let dir = mobile_music_dir(&app).ok_or_else(|| AppError::Message("file.unreadable".into()))?;
+        std::fs::create_dir_all(&dir).map_err(|err| AppError::Message(format!("music folder: {err}")))?;
         let marker = dir.join(MOBILE_IMPORT_MARKER);
         let _ = std::fs::remove_file(&marker);
         open_folder_picker().map_err(AppError::Message)?;
         let handle = app.clone();
         std::thread::spawn(move || {
-            // The copy runs on the activity side, so wait for its marker instead of guessing.
+            // The copy runs on the activity side, so the marker is the only completion signal.
             for _ in 0..1_200 {
-                if marker.exists() {
+                if let Ok(text) = std::fs::read_to_string(&marker) {
                     let _ = std::fs::remove_file(&marker);
-                    if let Some(state) = handle.try_state::<AppState>() {
-                        let added = scan::import_path(&state.db, &dir, "auto").map(|summary| summary.added).unwrap_or(0);
+                    let status = match text.trim().parse::<i64>() {
+                        Ok(-2) => "cancelled",
+                        Ok(-1) => "failed",
+                        Ok(_) => "ok",
+                        Err(_) => "failed",
+                    };
+                    let added = if status == "ok" {
+                        handle
+                            .try_state::<AppState>()
+                            .and_then(|state| scan::import_path(&state.db, &dir, "auto").ok())
+                            .map(|summary| summary.added)
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    if status == "ok" {
                         let _ = handle.emit("library-updated", json!({}));
-                        let _ = handle.emit("mobile-import-finished", json!({ "added": added }));
                     }
+                    let _ = handle.emit(
+                        "mobile-import-finished",
+                        json!({ "added": added, "status": status }),
+                    );
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
+            // Never leave the player waiting forever if the activity never reports back.
+            let _ = handle.emit("mobile-import-finished", json!({ "added": 0, "status": "timeout" }));
         });
         Ok(())
     }

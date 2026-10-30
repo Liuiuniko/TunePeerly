@@ -774,19 +774,34 @@ function useModel() {
       if (isAndroidApp()) {
         // The system picker copies the chosen tree into app storage in the background; Rust
         // rescans when the copy finishes and tells us here, so nothing polls on this side.
-        const done = new Promise<number>((resolve) => {
-          const timer = window.setTimeout(() => resolve(-1), 15 * 60 * 1000);
-          listen<{ added: number }>("mobile-import-finished", (event) => {
+        let unlisten: (() => void) | undefined;
+        const done = new Promise<{ added: number; status: string }>((resolve) => {
+          const timer = window.setTimeout(() => resolve({ added: 0, status: "timeout" }), 15 * 60 * 1000);
+          listen<{ added: number; status: string }>("mobile-import-finished", (event) => {
             window.clearTimeout(timer);
-            resolve(event.payload.added);
-          }).catch(() => resolve(-1));
+            resolve({ added: event.payload.added, status: event.payload.status });
+          })
+            .then((stop) => {
+              unlisten = stop;
+            })
+            .catch(() => resolve({ added: 0, status: "failed" }));
         });
-        await api.mobilePickFolder();
-        const added = await done;
-        if (added > 0) {
-          toast(t("toast.imported", { count: added }));
-          reloadLyrics();
-          await refresh();
+        try {
+          await api.mobilePickFolder();
+          const result = await done;
+          if (result.status === "cancelled") return;
+          if (result.status !== "ok") {
+            // A failed or timed-out import used to look exactly like "nothing happened".
+            toast(t("toast.importFailed"));
+            return;
+          }
+          if (result.added > 0) {
+            toast(t("toast.imported", { count: result.added }));
+            reloadLyrics();
+            await refresh();
+          }
+        } finally {
+          unlisten?.();
         }
         return;
       }

@@ -72,13 +72,21 @@ class MainActivity : TauriActivity() {
   }
 
   private val picker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
-    if (tree != null) startImport(tree)
+    if (tree == null) {
+      // Rust waits for this marker, so a cancel has to be reported too, or the UI sits out its
+      // whole timeout with nothing on screen.
+      writeMarker(CANCELLED)
+    } else {
+      startImport(tree)
+    }
   }
 
   private fun startImport(tree: Uri) {
-    val music = File(filesDir, "music")
-    val marker = File(music, MARKER)
-    marker.delete()
+    // Must be `dataDir`, not `filesDir`: Rust scans `app.path().data_dir()/music`, which on Android
+    // is `Context.getDataDir()`. `filesDir` puts the songs one level deeper and the scan then always
+    // finds an empty folder.
+    val music = File(applicationContext.dataDir, "music")
+    deleteMarker()
     importer.execute {
       val copied = try {
         copyTree(tree, music)
@@ -86,37 +94,33 @@ class MainActivity : TauriActivity() {
         Log.w(TAG, "import failed: ${err.message}")
         -1
       }
-      runOnUiThread {
-        if (copied < 0) {
-          toast(getString(R.string.import_failed))
-        } else if (copied == 0) {
-          toast(getString(R.string.import_nothing_new))
-        }
+      if (copied < 0) {
+        runOnUiThread { toast(getString(R.string.import_failed)) }
+      } else if (copied == 0) {
+        runOnUiThread { toast(getString(R.string.import_nothing_new)) }
       }
-      // Rust waits for this file: it means the folder is complete and safe to scan.
-      try {
-        marker.writeText(copied.toString())
-      } catch (err: Exception) {
-        Log.w(TAG, "could not write the import marker: ${err.message}")
-      }
+      writeMarker(if (copied < 0) FAILED else copied)
     }
   }
 
   /**
    * Walks the picked document tree and copies every audio file, keeping folder names. Files that
    * are already there with the same size are skipped, so picking the same folder twice is cheap.
+   *
+   * Each folder has to carry its own document id: `getTreeDocumentId` always returns the id of the
+   * picked root, so building child URIs from it lists the root again, never descends, and keeps
+   * copying the same files into deeper and deeper folders.
    */
   private fun copyTree(tree: Uri, root: File): Int {
     val resolver = contentResolver
     var copied = 0
-    val pending = ArrayDeque<Pair<Uri, File>>()
-    pending.addLast(tree to root)
+    val visited = HashSet<String>()
+    val pending = ArrayDeque<Triple<Uri, File, String>>()
+    pending.addLast(Triple(tree, root, DocumentsContract.getTreeDocumentId(tree)))
     while (pending.isNotEmpty()) {
-      val (dirUri, dirFile) = pending.removeLast()
-      val children = DocumentsContract.buildChildDocumentsUriUsingTree(
-        dirUri,
-        DocumentsContract.getTreeDocumentId(dirUri),
-      )
+      val (treeUri, dirFile, documentId) = pending.removeLast()
+      if (!visited.add(documentId)) continue
+      val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
       resolver.query(
         children,
         arrayOf(
@@ -134,16 +138,16 @@ class MainActivity : TauriActivity() {
           val name = safeName(cursor.getString(1) ?: continue)
           val mime = cursor.getString(2)
           val size = if (cursor.isNull(3)) -1L else cursor.getLong(3)
-          val childUri = DocumentsContract.buildDocumentUriUsingTree(dirUri, id)
+          val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
           if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-            pending.addLast(childUri to File(dirFile, name))
+            pending.addLast(Triple(treeUri, File(dirFile, name), id))
             continue
           }
           if (!isAudio(name)) continue
           val target = File(dirFile, name)
           if (size >= 0 && target.isFile && target.length() == size) continue
           target.parentFile?.mkdirs()
-          // Copy under a temporary name first, so an interrupted copy is never mistaken for a track.
+          // Copy under a temporary name first, so an interrupted copy is never taken for a track.
           val partial = File(target.parentFile, "$name.part")
           val stream = resolver.openInputStream(childUri) ?: continue
           stream.use { input -> partial.outputStream().use { output -> input.copyTo(output) } }
@@ -156,6 +160,29 @@ class MainActivity : TauriActivity() {
       }
     }
     return copied
+  }
+
+  /** Writes the marker through a temporary file, so Rust never reads a half-written number. */
+  private fun writeMarker(value: Int) {
+    try {
+      val music = File(applicationContext.dataDir, "music")
+      music.mkdirs()
+      val marker = File(music, MARKER)
+      val partial = File(music, "$MARKER.part")
+      partial.writeText(value.toString())
+      if (!partial.renameTo(marker)) {
+        marker.delete()
+        partial.renameTo(marker)
+      }
+    } catch (err: Exception) {
+      Log.w(TAG, "could not write the import marker: ${err.message}")
+    }
+  }
+
+  private fun deleteMarker() {
+    val music = File(applicationContext.dataDir, "music")
+    File(music, MARKER).delete()
+    File(music, "$MARKER.part").delete()
   }
 
   private fun isAudio(name: String): Boolean =
@@ -171,6 +198,8 @@ class MainActivity : TauriActivity() {
   private companion object {
     const val TAG = "TunePeerly"
     const val MARKER = ".import-done"
+    const val FAILED = -1
+    const val CANCELLED = -2
     val AUDIO_EXTENSIONS = setOf(
       "mp3", "flac", "m4a", "m4b", "aac", "ogg", "oga", "opus", "wav", "wave",
       "wma", "aiff", "aif", "alac", "ape", "wv", "mp4", "caf", "dsf", "dff", "tta", "spx",
